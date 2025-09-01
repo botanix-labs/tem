@@ -41,7 +41,7 @@
 //! trees (Ethereum-compatible), and Bitcoin block organization structures for
 //! handling reorganizations.
 //!
-//! ### [`foundation`] *(Work in Progress)*
+//! ### [`foundation`]
 //! Provides the foundational layer for state management and commitment
 //! operations within the federated multisig system and the TEE environment.
 //! Handles the core execution logic for processing blockchain data and
@@ -87,17 +87,109 @@ pub mod structs;
 pub mod tem;
 pub mod validation;
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloy_primitives::TxHash;
+    use bitcoin::{
+        BlockHash, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, WPubkeyHash, Witness,
+    };
+    use rand::Rng;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    use crate::validation::pegout::{PegoutData, PegoutId, PegoutWithId};
+
+    pub fn gen_bitcoin_tx_from_pegouts(pegouts: &[&PegoutData]) -> bitcoin::Transaction {
+        let mut input = vec![];
+        for _ in 0..rand::rng().random_range(1..5) {
+            let vout = rand::rng().random_range(0..4_000);
+
+            // Mimicking a P2WPKH input; first item is the signature+sighash, second
+            // item is the compressed public key.
+            let witness: [Vec<u8>; 2] = [
+                rand::rng().random::<[u8; 71]>().to_vec(),
+                rand::rng().random::<[u8; 33]>().to_vec(),
+            ];
+
+            let txin = TxIn {
+                previous_output: OutPoint {
+                    txid: gen_bitcoin_txid(),
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&witness),
+            };
+
+            input.push(txin);
+        }
+
+        let mut output = vec![];
+        for pegout in pegouts {
+            let txout = TxOut {
+                value: pegout.amount,
+                script_pubkey: pegout.destination.script_pubkey(),
+            };
+
+            output.push(txout);
+        }
+
+        bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input,
+            output,
+        }
+    }
+
+    pub fn gen_bitcoin_hash() -> BlockHash {
+        use bitcoin::hashes::sha256d::Hash;
+
+        let r = rand::rng().random::<[u8; 32]>();
+        let h = Hash::from_bytes_ref(&r);
+        BlockHash::from_raw_hash(*h)
+    }
+
+    pub fn gen_bitcoin_txid() -> Txid {
+        use bitcoin::hashes::sha256d::Hash;
+
+        let r = rand::rng().random::<[u8; 32]>();
+        let h = Hash::from_bytes_ref(&r);
+        Txid::from_raw_hash(*h)
+    }
+
+    pub fn gen_botanix_hash() -> TxHash {
+        let r = rand::rng().random::<[u8; 32]>();
+        TxHash::from_slice(&r)
+    }
+
+    pub fn gen_pegout_with_id() -> PegoutWithId {
+        PegoutWithId {
+            id: gen_pegout_id(),
+            data: gen_pegout_data(),
+        }
+    }
+
+    pub fn gen_pegout_id() -> PegoutId {
+        let tx_hash = rand::rng().random::<[u8; 32]>();
+        let log_idx = rand::rng().random_range::<u32, _>(0..4_000);
+
+        PegoutId { tx_hash, log_idx }
+    }
+
+    pub fn gen_pegout_data() -> PegoutData {
+        use bitcoin::hashes::hash160::Hash;
+
+        let sats = rand::rng().random_range::<u64, _>(10_000..100_000_000);
+
+        let r = rand::rng().random::<[u8; 20]>();
+        let &h = Hash::from_bytes_ref(&r);
+        let wpub = WPubkeyHash::from_raw_hash(h);
+        let script_pubkey = ScriptBuf::new_p2wpkh(&wpub);
+
+        PegoutData {
+            amount: bitcoin::Amount::from_sat(sats),
+            destination: bitcoin::Address::from_script(&script_pubkey, bitcoin::Network::Bitcoin)
+                .unwrap(),
+            network: bitcoin::Network::Bitcoin,
+        }
     }
 }
