@@ -16,33 +16,10 @@ The representative system operates under a fairness assumption where block produ
 
 A critical security consideration is that representatives may be malicious and could attempt to submit operations that result in penalties or equivocations for other multisig participants (a form of sabotage). To prevent this attack vector, any operation that could potentially cause negative consequences for other validators must include cryptographic signatures from those affected parties. This requirement ensures that malicious representatives cannot unilaterally commit honest validators to actions they did not authorize, maintaining the integrity of the multisig coordination process even when block producers are compromised.
 
-## Operational Message Types and Misbehavior Detection
+## Architecture
 
-The Foundation Layer processes operations through discrete message types:
-
-- `BitcoinHeader` - Bitcoin state management and block tree updates
-- `RegisterPsbt` - PSBT validation and registration with inclusion proofs
-- `ImOnline` - Validator liveness tracking for multisig participation
-- `ReturnPegouts` - Pegout return handling for failed or orphaned PSBTs
-- `CommitmentProof` - State commitment validation and integrity verification
-
-The system implements comprehensive equivocation detection through equivocation error types:
-
-**Pegout Authorization Violations:**
-- `PegoutNotInitiated` - Attempting to spend unauthorized pegouts
-- `PegoutAmountExceeded` - Withdrawing more than authorized amount
-- `PegoutDestinationMismatch` - Modifying withdrawal destinations
-
-**Double-Spend Prevention:**
-- `PegoutReturnAlreadyPending` - Manipulating pending pegout states
-- `PegoutReturnAlreadyBacklogged` - Manipulating backlogged pegout states
-- `PegoutReturnNotInitiated` - Returning non-existent pegouts
-
-**PSBT Integrity Violations:**
-- `PsbtRegistrationBadHeader` - Registering PSBTs against invalid headers
-- `NoCommitmentProofProvided` - Missing required state commitment proofs
-- `BadCommitmentProof` - Invalid or manipulated commitment proofs
-
-This equivocation system ensures that even if individual validators or representatives become malicious or compromised, the Foundation Layer can detect and prevent unauthorized operations while maintaining the integrity of the overall pegout system. Malicious representatives should consequently also get punished for their actions. The cryptographic proof requirements mean that validators cannot successfully lie about Bitcoin state, Botanix state, or pegout authorizations without detection, while the signature requirements for penalty-inducing operations prevent malicious representatives from harming honest participants.
+<div align="center">
+<img src="assets/foundation_module_system.png" alt="Foundation Module System" width="100%">
+</div>
 
 _Work-in-Progress..._
