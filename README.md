@@ -46,34 +46,46 @@ This repository is primarily intended to be used as a library. Further structura
 To generate the documentation for `botanix_tem`:
 
 ```
-cargo doc
+cargo doc --document-private-items
 ```
 
 # Roadmap
 
+Temporary roadmap while this repository remains primarily work-in-progress. This section will be removed later on.
+
 ## Foundation Module (`src/foundation/`)
 
-_Work-in-Progress_ - Multiple proof-of-concept implementations have been explored:
-  - Custom implementation (initial approach)
-  - `bonsai-trie` integration attempt
-  - `merk` evaluation
-  - Current focus: Parity's `sp-trie` implementation
-
-Expected to be completed soon. **Currently a blocker for TEM module progression**
+- [x] **Commitment System** (`src/foundation/commitment/`) - Cryptographic state commitment using `trie-db`
+  - [x] Entry system with domain-separated keys (`entry.rs`)
+  - [x] Sorted data structures for deterministic operations (`sorted.rs`)
+  - [x] Low-level trie operations with consistency guarantees (`trie.rs`)
+  - [x] Higher-level Botanix state management (`botanix.rs`)
+  - [x] Atomic storage operations with transaction semantics (`storage.rs`)
+  - [x] Custom node codec for trie encoding/decoding (_forked_) (`node_codec.rs`)
+- [x] **Proof System** (`src/foundation/proof.rs`) - Cryptographic state proofs for consensus
+  - [x] Foundation state root computation
+  - [x] Auxiliary event tracking for efficient lookups
+  - [x] State reconstruction capabilities
+- [x] **Core Foundation API** (`src/foundation/mod.rs`) - Main interface
+  - [x] Two-phase operation model (propose/finalize)
+  - [x] Pegout lifecycle management (initiated -> pending -> delayed/finalized)
+  - [x] Bitcoin block tree coordination with automatic pruning
+  - [x] Deterministic state transitions for consensus
+- [ ] Testing
+  - [x] Basic unit tests
+  - [ ] Comprehensive tests
 
 ## TEM Module (`src/tem/`)
 
 - [ ] **Core Implementation**
-  - _**Blocked by Foundation Layer**_
   - [x] Input validation workflow
-  - [ ] Pegout set tracking
+  - [ ] Pegout set tracking (_requires Foundation module_)
   - [ ] Frost package signing implementation
   - [ ] gRPC interface
 - [x] **Validation Framework**
   - [x] Tendermint chain validation setup
   - [x] Botanix header validation against Tendermint
   - [x] Pegout validation with Merkle proofs
-  - [ ] Complete implementation
 - [ ] Testing
   - [ ] Basic unit tests
   - [ ] Comprehensive tests
