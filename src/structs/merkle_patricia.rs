@@ -202,7 +202,7 @@ pub fn compute_proof<T: AsRef<[u8]>>(
     // Find the matching nibble-node pairs for the key.
     let mut nodes = trie.take_proof_nodes().matching_nodes(&nibbles);
 
-    // Sorty by nibble in ascending order (root-to-leaf).
+    // Sorty by nibble in descending order (root-to-leaf).
     nodes.sort_by(|(n0, _), (n1, _)| n0.cmp(&n1));
 
     // Filter out the nibbles, only retain the nodes.
