@@ -27,7 +27,7 @@
 //! operate without network access or persistent storage.
 //!
 //! <img src="data:image/png;base64,
-#![doc = include_str!("../../docs/assets/validation_overview_base64.txt")]
+#![doc = include_str!("../../docs/assets/validation_overview.base64")]
 //! " alt="Validation Workflow Diagram" style="max-width: 90%; width: 800px; height: auto; display: block; margin: 0 auto;">
 
 pub mod bitcoin;

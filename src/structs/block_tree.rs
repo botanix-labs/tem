@@ -100,7 +100,7 @@ impl BlockFate {
 ///
 /// Tracks the block's position, parent relationship, and children for
 /// efficient traversal and pruning operations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BlockNode {
     /// Relative height of this block from the tree's root.
     rheight: u64,
@@ -138,6 +138,7 @@ struct BlockNode {
 /// Blocks become eligible for pruning when they are more than `conf_depth`
 /// blocks behind the current best height, but actual pruning depends on fork
 /// resolution.
+#[derive(Debug, Clone)]
 pub struct BlockTree {
     /// Current chain tips (blocks with no children)
     tips: HashSet<BlockHash>,

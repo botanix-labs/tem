@@ -154,6 +154,8 @@ impl CheckedBitcoinHeader {
 /// inner transaction is kept private to prevent direct modification.
 pub struct CheckedBitcoinTransaction {
     /* PRIVATE */ _header: Transaction,
+    // The Bitcoin block this transaction is included in.
+    block_hash: BlockHash,
 }
 
 impl AsRef<Transaction> for CheckedBitcoinTransaction {
@@ -197,7 +199,13 @@ impl CheckedBitcoinTransaction {
         verify_transaction_proof(&untrusted, proof, checked.as_ref().merkle_root.as_ref())?;
         let trusted = untrusted;
 
-        Ok(CheckedBitcoinTransaction { _header: trusted })
+        Ok(CheckedBitcoinTransaction {
+            _header: trusted,
+            block_hash: checked.as_ref().block_hash(),
+        })
+    }
+    pub fn block_hash(&self) -> &BlockHash {
+        &self.block_hash
     }
 }
 

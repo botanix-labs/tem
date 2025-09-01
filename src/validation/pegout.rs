@@ -49,7 +49,7 @@ use crate::{
     structs::merkle_patricia::{self, MerklePatriciaProof},
     validation::botanix::{verify_receipt_proof, verify_transaction_proof},
 };
-use alloy_primitives::{Address, B256, Log, TxHash, U256, keccak256};
+use alloy_primitives::{Address, B256, Log, U256, keccak256};
 use alloy_sol_types::{SolType, sol_data};
 use alloy_trie::Nibbles;
 use std::str::FromStr;
@@ -224,7 +224,7 @@ impl CheckedPegoutWithId {
 
         // Construct appropriate PegoutId.
         let id = PegoutId {
-            tx_hash: trusted_tx.hash_slow(),
+            tx_hash: trusted_tx.hash_slow().into(),
             // NOTE: this log index is implicitly (in-)validated depending on
             // whether the upcoming pegout extraction mechanism succeeds.
             log_idx: log_idx as u32,
@@ -253,12 +253,6 @@ pub struct PegoutWithId {
     pub data: PegoutData,
 }
 
-impl PegoutWithId {
-    pub fn serialize(&self) -> Vec<u8> {
-        todo!()
-    }
-}
-
 /// Unique identifier for a pegout transaction.
 ///
 /// Combines the transaction hash with the log index to create a globally unique
@@ -266,7 +260,8 @@ impl PegoutWithId {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PegoutId {
     /// Hash of the transaction containing the pegout.
-    pub tx_hash: TxHash,
+    // TODO: Newtype?
+    pub tx_hash: [u8; 32],
     /// Index of the pegout log within the transaction's receipt.
     pub log_idx: u32,
 }
