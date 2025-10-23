@@ -61,8 +61,9 @@ use crate::{
 use bitcoin::{BlockHash, TxOut, Txid};
 use std::collections::{HashSet, VecDeque};
 
+/* PRIVATE */
 mod commitment;
-pub mod proof;
+mod component;
 #[cfg(test)]
 mod tests;
 
