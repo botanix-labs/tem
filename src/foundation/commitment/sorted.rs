@@ -5,6 +5,8 @@
 //! consistent hash computation and serialization across different executions.
 use std::ops::Deref;
 
+use serde::{Deserialize, Serialize};
+
 /// A wrapper around `Vec<T>` that maintains items in sorted order for
 /// deterministic operations.
 ///
@@ -24,7 +26,7 @@ use std::ops::Deref;
 ///
 /// The contained type `T` must implement `Ord` to maintain the sorted
 /// invariant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sorted<T>(Vec<T>);
 
 // IMPORTANT: this type should NOT implement data-manipulation methods such as
@@ -36,11 +38,29 @@ where
     pub fn new(list: Vec<T>) -> Self {
         Self::from(list)
     }
+    pub fn empty() -> Self {
+        Self::default()
+    }
+    pub fn to_vec(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.0.to_vec()
+    }
+    pub fn into_vec(self) -> Vec<T> {
+        self.0
+    }
 }
 
 impl<T> From<Sorted<T>> for Vec<T> {
     fn from(value: Sorted<T>) -> Self {
         value.0
+    }
+}
+
+impl<T> Default for Sorted<T> {
+    fn default() -> Self {
+        Self(vec![])
     }
 }
 
