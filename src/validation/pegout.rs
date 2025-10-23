@@ -52,6 +52,8 @@ use crate::{
 use alloy_primitives::{Address, B256, Log, U256, keccak256};
 use alloy_sol_types::{SolType, sol_data};
 use alloy_trie::Nibbles;
+use bitcoin::ScriptBuf;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 lazy_static::lazy_static! {
@@ -247,7 +249,7 @@ impl CheckedPegoutWithId {
 /// A pegout transaction with its unique identifier.
 ///
 /// Contains both the identifying information and the actual pegout data.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PegoutWithId {
     pub id: PegoutId,
     pub data: PegoutData,
@@ -257,7 +259,7 @@ pub struct PegoutWithId {
 ///
 /// Combines the transaction hash with the log index to create a globally unique
 /// identifier for each pegout.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PegoutId {
     /// Hash of the transaction containing the pegout.
     // TODO: Newtype?
@@ -269,7 +271,8 @@ pub struct PegoutId {
 /// Complete pegout operation data.
 ///
 /// Contains all the information needed to perform a Bitcoin pegout.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+// TODO: Note the custom serde impl
 pub struct PegoutData {
     /// Amount to be pegged out from Botanix to Bitcoin.
     pub amount: bitcoin::Amount,
@@ -374,6 +377,135 @@ pub fn extract_pegout_data(
         destination: network_checked_destination,
         network: btc_network,
     })
+}
+
+// TODO: This should probably be placed in an individual module?
+// TODO: Add explicit test for this.
+impl serde::Serialize for PegoutData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("PegoutData", 3)?;
+        state.serialize_field("amount", &self.amount)?;
+
+        // Convert address to bytes using the network
+        let address_bytes = self.destination.script_pubkey();
+        state.serialize_field("destination", &address_bytes)?;
+
+        state.serialize_field("network", &self.network)?;
+        state.end()
+    }
+}
+
+// TODO: This should probably be placed in an individual module?
+// TODO: Add explicit test for this.
+impl<'de> serde::Deserialize<'de> for PegoutData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+
+        enum Field {
+            Amount,
+            Destination,
+            Network,
+        }
+
+        impl<'de> serde::Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        formatter.write_str("`amount`, `destination`, or `network`")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                    where
+                        E: de::Error,
+                    {
+                        match value {
+                            "amount" => Ok(Field::Amount),
+                            "destination" => Ok(Field::Destination),
+                            "network" => Ok(Field::Network),
+                            _ => Err(de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct PegoutDataVisitor;
+
+        impl<'de> Visitor<'de> for PegoutDataVisitor {
+            type Value = PegoutData;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("struct PegoutData")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<PegoutData, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut amount = None;
+                let mut destination_bytes = None;
+                let mut network = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Amount => {
+                            if amount.is_some() {
+                                return Err(de::Error::duplicate_field("amount"));
+                            }
+                            amount = Some(map.next_value()?);
+                        }
+                        Field::Destination => {
+                            if destination_bytes.is_some() {
+                                return Err(de::Error::duplicate_field("destination"));
+                            }
+                            destination_bytes = Some(map.next_value::<Vec<u8>>()?);
+                        }
+                        Field::Network => {
+                            if network.is_some() {
+                                return Err(de::Error::duplicate_field("network"));
+                            }
+                            network = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let amount = amount.ok_or_else(|| de::Error::missing_field("amount"))?;
+                let destination_bytes =
+                    destination_bytes.ok_or_else(|| de::Error::missing_field("destination"))?;
+                let destination_bytes = ScriptBuf::from_bytes(destination_bytes);
+                let network = network.ok_or_else(|| de::Error::missing_field("network"))?;
+
+                let destination = bitcoin::Address::from_script(&destination_bytes, network)
+                    .map_err(de::Error::custom)?;
+
+                Ok(PegoutData {
+                    amount,
+                    destination,
+                    network,
+                })
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["amount", "destination", "network"];
+        deserializer.deserialize_struct("PegoutData", FIELDS, PegoutDataVisitor)
+    }
 }
 
 #[cfg(test)]
