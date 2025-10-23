@@ -47,16 +47,12 @@
 //! " alt="Validation Workflow Diagram" style="max-width: 100%; width: 1000px; height: auto; display: block; margin: 0 auto;">
 use crate::{
     foundation::{
-        commitment::{
-            MultisigId,
-            botanix::{BotanixLayer, ImplFatalKind},
-            sorted::Sorted,
-            trie::ErrorKind as TrieErrorKind,
-        },
+        commitment::sorted::Sorted,
+        component::{BotanixLayer, pegout::PegoutError},
         proof::{AuxEvent, Context, FoundationStateProof, FoundationStateRoot},
     },
     structs::block_tree::{BlockFate, BlockTree},
-    validation::pegout::{PegoutData, PegoutId, PegoutWithId},
+    validation::pegout::{PegoutId, PegoutWithId},
 };
 use bitcoin::{BlockHash, TxOut, Txid};
 use std::collections::{HashSet, VecDeque};
@@ -67,34 +63,76 @@ mod component;
 #[cfg(test)]
 mod tests;
 
+pub mod proof;
+
 // Public re-exports.
-pub use commitment::CommitmentStateRoot;
-pub use commitment::storage::{AtomicError, AtomicLayer, InMemoryCommitments};
+pub use commitment::atomic::{AtomicCommitLayer, AtomicError, CommitLayerError};
+pub use commitment::fat_db::FatDB;
+pub use commitment::mem_db::InMemoryCommitments;
+pub use commitment::trie::{CommitmentStateRoot, TrieLayer};
+pub use commitment::{CommitHasher, MultisigId};
+pub use component::pegout::{
+    DataSource, DataSourceError, OnchainHeaderEntry, OnchainUtxoEntry, ProposalEntry,
+    UnassignedEntry,
+};
+pub use component::{AtomicDataLayer, DataLayerError};
 
-pub trait DataLayer {
-    type Error: std::fmt::Debug;
-
-    fn get_bitcoin_header(
-        &self,
-        block_hash: &BlockHash,
-    ) -> Result<Option<bitcoin::block::Header>, Self::Error>;
-    fn get_pegout_by_id(&self, id: &PegoutId) -> Result<Option<PegoutData>, Self::Error>;
-    fn get_txids_by_block_hash(&self, hash: &BlockHash) -> Result<Vec<Txid>, Self::Error>;
-    fn get_pegouts_by_txid(&self, txid: &Txid) -> Result<Vec<PegoutWithId>, Self::Error>;
-}
+// TODO: Expose those in crate root, maybe?
+pub use bitcoin;
+pub use hash_db;
+pub use trie_db;
 
 pub const MULTISIG: MultisigId = 0;
 
+// TODO: Rename A to C
 #[derive(Debug, PartialEq, Eq)]
-pub enum Error<D, A> {
+pub enum Error<D, A, DS> {
     ValidationError(ValidationError),
-    BackendError(BackendError<D, A>),
+    BackendError(BackendError<D, A, DS>),
+}
+
+impl<D, A, DS> From<ValidationError> for Error<D, A, DS> {
+    fn from(err: ValidationError) -> Self {
+        Error::ValidationError(err)
+    }
+}
+
+impl<D, A, DS> From<BackendError<D, A, DS>> for Error<D, A, DS> {
+    fn from(err: BackendError<D, A, DS>) -> Self {
+        Error::BackendError(err)
+    }
+}
+
+impl<D, A, DS> From<PegoutError<DS>> for Error<D, A, DS> {
+    fn from(err: PegoutError<DS>) -> Self {
+        match err {
+            PegoutError::ValidationError(err) => Error::ValidationError(err.into()),
+            PegoutError::BackendError(err) => Error::BackendError(err.into()),
+        }
+    }
+}
+
+impl<D, A, DS> From<DataLayerError<D>> for Error<D, A, DS> {
+    fn from(err: DataLayerError<D>) -> Self {
+        Error::BackendError(err.into())
+    }
+}
+
+impl<D, A, DS> From<CommitLayerError<A>> for Error<D, A, DS> {
+    fn from(err: CommitLayerError<A>) -> Self {
+        Error::BackendError(err.into())
+    }
+}
+
+impl<D, A, DS> From<DataSourceError<DS>> for Error<D, A, DS> {
+    fn from(err: DataSourceError<DS>) -> Self {
+        Error::BackendError(err.into())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValidationError {
     BadFoundationStateRoot,
-    PegoutDoesNotExist,
     BadBitcoinHeader,
     EmptyPegoutList,
     TxOutValueExceedsPegoutAmount,
@@ -104,54 +142,57 @@ pub enum ValidationError {
     TxOutputsRemainingUnchecked,
     PegoutListRemainingUnchecked,
     TxidAlreadyRegistered,
-    /// Error caused in the trie layer caused by a bad trie operation. This
-    /// implies malicious behavior.
-    BadTrieOp(TrieErrorKind),
+    //
+    PegoutError(component::pegout::ValidationError),
+}
+
+impl From<component::pegout::ValidationError> for ValidationError {
+    fn from(err: component::pegout::ValidationError) -> Self {
+        ValidationError::PegoutError(err)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum BackendError<D, A> {
-    /// The computed root after an atomic operation (commit/rollback) on the
-    /// commitment layer did not match some expected value. This generally
-    /// implies a software bug.
-    BadPostAtomicRoot,
+pub enum BackendError<D, A, DS> {
     /// Error in the data layer.
-    DataLayerError(D),
-    /// Error in the atomic commit/rollback mechanism.
-    AtomicLayerError(AtomicError<A>),
-    /// Error in trie layer caused by passing-on bad data. This generally
-    /// implies a software bug.
-    BadTrieData(ImplFatalKind),
-    /// Error in the trie layer caused by a backend issue. This generally
-    /// implies corrupted database.
-    TrieLayerError(trie_db::TrieError<[u8; 32], trie_db::CError<commitment::CommitSchema>>),
+    DataLayer(DataLayerError<D>),
+    /// Error in the commitment layer.
+    CommitLayer(CommitLayerError<A>),
+    DataSource(DataSourceError<DS>),
+    /// The computed root after an atomic operation (commit/rollback) on the
+    /// commitment layer did not match some expected value.
+    ///
+    /// This generally implies a software bug.
+    BadPostAtomicRoot,
+    /// Fatal error in the commitment layer.
+    ///
+    /// This generally implies corrupted database.
+    Fatal(trie_db::TrieError<[u8; 32], trie_db::CError<commitment::CommitSchema>>),
 }
 
-impl<D, A> From<ValidationError> for Error<D, A> {
-    fn from(value: ValidationError) -> Self {
-        Error::ValidationError(value)
+impl<D, A, DS> From<DataLayerError<D>> for BackendError<D, A, DS> {
+    fn from(err: DataLayerError<D>) -> Self {
+        BackendError::DataLayer(err)
     }
 }
 
-impl<D, A> From<BackendError<D, A>> for Error<D, A> {
-    fn from(value: BackendError<D, A>) -> Self {
-        Error::BackendError(value)
+impl<D, A, DS> From<CommitLayerError<A>> for BackendError<D, A, DS> {
+    fn from(err: CommitLayerError<A>) -> Self {
+        BackendError::CommitLayer(err)
     }
 }
 
-impl<'a, D, A> From<commitment::botanix::Error<'a>> for Error<D, A> {
-    fn from(value: commitment::botanix::Error<'a>) -> Self {
-        match value {
-            commitment::botanix::Error::BadTrieOp { entry: _, kind } => {
-                // TODO: Consider adding debug info on `entry`.
-                Error::ValidationError(ValidationError::BadTrieOp(kind))
-            }
-            commitment::botanix::Error::ImplFatal(kind) => {
-                Error::BackendError(BackendError::BadTrieData(kind))
-            }
-            commitment::botanix::Error::TrieFatal(err) => {
-                Error::BackendError(BackendError::TrieLayerError(err))
-            }
+impl<D, A, DS> From<DataSourceError<DS>> for BackendError<D, A, DS> {
+    fn from(err: DataSourceError<DS>) -> Self {
+        BackendError::DataSource(err)
+    }
+}
+
+impl<D, A, DS> From<component::BackendError<DS>> for BackendError<D, A, DS> {
+    fn from(err: component::BackendError<DS>) -> Self {
+        match err {
+            component::BackendError::DataSource(err) => BackendError::DataSource(err),
+            component::BackendError::Fatal(err) => BackendError::Fatal(err),
         }
     }
 }
@@ -204,7 +245,7 @@ impl<'a, D, A> From<commitment::botanix::Error<'a>> for Error<D, A> {
 /// // Proposal phase - validate and compute new state root
 /// let proof = foundation.propose_commitments(|pending| {
 ///     pending.insert_bitcoin_header_unchecked(block_hash, parent_hash)?;
-///     pending.register_bitcoin_tx_unchecked(hash, tx, pegouts)?;
+///     pending.insert_bitcoin_tx_unchecked(hash, tx, pegouts)?;
 ///     Ok(())
 /// })?;
 ///
@@ -215,7 +256,7 @@ impl<'a, D, A> From<commitment::botanix::Error<'a>> for Error<D, A> {
 /// foundation.finalize_commitments(state_root, |pending| {
 ///     // Identical operations as proposal phase
 ///     pending.insert_bitcoin_header_unchecked(block_hash, parent_hash)?;
-///     pending.register_bitcoin_tx_unchecked(hash, tx, pegouts)?;
+///     pending.insert_bitcoin_tx_unchecked(hash, tx, pegouts)?;
 ///     Ok(())
 /// })?;
 /// ```
@@ -229,47 +270,59 @@ impl<'a, D, A> From<commitment::botanix::Error<'a>> for Error<D, A> {
 pub struct Foundation<D, A> {
     /* PRIVATE! */
     data_layer: D,
-    atomic_layer: A,
+    commit_layer: A,
     block_tree: BlockTree,
     height: u64,
 }
 
 impl<D, A> Foundation<D, A>
 where
-    D: DataLayer,
-    A: AtomicLayer,
-    Error<D::Error, A::BackendError>: From<D::Error>,
-    Error<D::Error, A::BackendError>: From<AtomicError<A::BackendError>>,
+    D: AtomicDataLayer,
+    A: AtomicCommitLayer,
+    <D as AtomicDataLayer>::Transaction: DataSource,
 {
     /// Creates a new Foundation instance with the specified data layer,
     /// commitment layer, and initial Bitcoin block.
     //
     // TODO: There must be a way to preload the `BlockTree` from the local
     // database.
+    //
+    // TODO: Be more distinct with "DataLayer" and "DataSource", it's kind of
+    // confusing; rename!
     pub fn new(
-        data_layer: D,
-        mut atomic_layer: A,
-        block_hash: BlockHash,
-        height: u64,
-    ) -> Result<Self, Error<D::Error, A::BackendError>> {
+        mut data_layer: D,
+        mut commit_layer: A,
+        bitcoin_hash: BlockHash,
+        bitcoin_height: u64,
+        botanix_height: u64,
+    ) -> Result<Self, Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>>
+    {
         // Commit the initial block hash.
         {
-            let mut l = atomic_layer.start_db_tx()?;
-            l.bitcoin_header(&block_hash, &vec![].into())?;
-            std::mem::drop(l);
+            let mut c: BotanixLayer<'_> = commit_layer.start_trie_tx()?.into();
+            let d: &mut D::Transaction = data_layer.start_data_tx()?;
 
-            atomic_layer.commit()?;
+            c.insert_bitcoin_header(bitcoin_hash, bitcoin_height, d)?;
+            std::mem::drop((c, d));
+
+            commit_layer.commit()?;
+            data_layer.commit()?;
         }
 
         Ok(Foundation {
             data_layer,
-            atomic_layer,
-            block_tree: BlockTree::new(block_hash, 3).unwrap(), // TODO
-            height,
+            commit_layer,
+            block_tree: BlockTree::new(bitcoin_hash, 3).unwrap(), // TODO
+            height: botanix_height,
         })
     }
-    pub fn commitment_root(&self) -> Result<CommitmentStateRoot, Error<D::Error, A::BackendError>> {
-        self.atomic_layer.root().map_err(Into::into)
+    pub fn commitment_root(
+        &mut self,
+    ) -> Result<
+        CommitmentStateRoot,
+        Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>,
+    > {
+        self.commit_layer.root().map_err(Into::into)
     }
     /// Validates a sequence of state changes and computes the resulting
     /// commitment root without persisting any modifications.
@@ -298,18 +351,26 @@ where
     pub fn propose_commitments<F, R>(
         &mut self,
         f: F,
-    ) -> Result<CheckedFoundationProof<R>, Error<D::Error, A::BackendError>>
+    ) -> Result<
+        CheckedFoundationProof<R>,
+        Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>,
+    >
     where
-        F: FnOnce(&mut CommitmentsDraft<D, A>) -> Result<R, Error<D::Error, A::BackendError>>,
+        F: FnOnce(
+            &mut CommitmentsDraft<D, A>,
+        ) -> Result<
+            R,
+            Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>,
+        >,
     {
         let mut draft = CommitmentsDraft {
-            data: &mut self.data_layer,
+            data: self.data_layer.start_data_tx()?,
             // NOTE: We do a full copy of the block tree since it does not
             // implement a rollback mechanism natively. It's usually small
             // enough (~18 entries) such that a full copy is considered
             // inexpensive.
             block_tree: self.block_tree.clone(),
-            layer: self.atomic_layer.start_db_tx()?,
+            layer: self.commit_layer.start_trie_tx()?.into(),
             aux_msgs: Vec::new(),
             _p: std::marker::PhantomData,
         };
@@ -318,12 +379,13 @@ where
 
         // Handle the commitments within the closure, and acquire the
         // UPDATED state root.
-        let res: Result<R, Error<D::Error, A::BackendError>> = f(&mut draft);
+        let res: Result<R, Error<_, _, _>> = f(&mut draft);
         let (_block_tree, foundation_state) = draft.into_foundation_state(self.height);
 
         // ROLLBACK: Always reset state after construction, on both success or
         // failure.
-        let reset_root = self.atomic_layer.rollback()?;
+        let reset_root = self.commit_layer.rollback()?;
+        self.data_layer.rollback()?;
 
         // Essentially a sanity check.
         if reset_root != origin_root {
@@ -375,18 +437,26 @@ where
         &mut self,
         expected_root: FoundationStateRoot,
         f: F,
-    ) -> Result<CheckedFoundationProof<R>, Error<D::Error, A::BackendError>>
+    ) -> Result<
+        CheckedFoundationProof<R>,
+        Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>,
+    >
     where
-        F: FnOnce(&mut CommitmentsDraft<D, A>) -> Result<R, Error<D::Error, A::BackendError>>,
+        F: FnOnce(
+            &mut CommitmentsDraft<D, A>,
+        ) -> Result<
+            R,
+            Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>,
+        >,
     {
         let mut draft = CommitmentsDraft {
-            data: &mut self.data_layer,
+            data: self.data_layer.start_data_tx()?,
             // NOTE: We do a full copy of the block tree since it does not
             // implement a rollback mechanism natively. It's usually small
             // enough (~18 entries) such that a full copy is considered
             // inexpensive.
             block_tree: self.block_tree.clone(),
-            layer: self.atomic_layer.start_db_tx()?,
+            layer: self.commit_layer.start_trie_tx()?.into(),
             aux_msgs: Vec::new(),
             _p: std::marker::PhantomData,
         };
@@ -402,7 +472,8 @@ where
             Ok(extra_val) => extra_val,
             Err(err) => {
                 // ROLLBACK: Operation failed; discard state!
-                let reset_root = self.atomic_layer.rollback()?;
+                let reset_root = self.commit_layer.rollback()?;
+                self.data_layer.rollback()?;
 
                 // Essentially a sanity check.
                 if reset_root != origin_root {
@@ -423,7 +494,8 @@ where
         if computed_root == expected_root {
             // COMMIT: Operation succeeded and expected root is valid;
             // persist state!
-            let updated_root = self.atomic_layer.commit()?;
+            let updated_root = self.commit_layer.commit()?;
+            self.data_layer.commit()?;
 
             // Essentially a sanity check.
             if updated_root != foundation_state.commitments {
@@ -448,7 +520,8 @@ where
             })
         } else {
             // ROLLBACK: Bad expected root; discard state!
-            let reset_root = self.atomic_layer.rollback()?;
+            let reset_root = self.commit_layer.rollback()?;
+            self.data_layer.rollback()?;
 
             // Essentially a sanity check.
             if reset_root != origin_root {
@@ -537,8 +610,12 @@ impl<T> CheckedFoundationProof<T> {
 /// - Audit trail of all state changes
 /// - Data for state synchronization between validators
 /// - Information useful for external system integration
-pub struct CommitmentsDraft<'db, D, A> {
-    data: &'db mut D,
+pub struct CommitmentsDraft<'db, D, A>
+where
+    D: AtomicDataLayer,
+    <D as AtomicDataLayer>::Transaction: DataSource,
+{
+    data: &'db mut D::Transaction,
     block_tree: BlockTree,
     layer: BotanixLayer<'db>,
     aux_msgs: Vec<AuxEvent>,
@@ -547,10 +624,9 @@ pub struct CommitmentsDraft<'db, D, A> {
 
 impl<'db, D, A> CommitmentsDraft<'db, D, A>
 where
-    D: DataLayer,
-    A: AtomicLayer,
-    Error<D::Error, A::BackendError>: From<D::Error>,
-    Error<D::Error, A::BackendError>: From<AtomicError<A::BackendError>>,
+    D: AtomicDataLayer,
+    A: AtomicCommitLayer,
+    <D as AtomicDataLayer>::Transaction: DataSource,
 {
     /// Initiates a new pegout, transitioning it to the "initiated" state.
     ///
@@ -574,17 +650,36 @@ where
     /// This method can fail if:
     /// - The pegout already exists in initiated state
     /// - Database or trie operation failures
-    pub fn initiate_pegout(
+    pub fn insert_unassigned(
         &mut self,
-        multisig: MultisigId,
         pegout: PegoutWithId,
-    ) -> Result<(), Error<D::Error, A::BackendError>> {
-        self.layer.initiate_pegout(&multisig, &pegout)?;
+        candidates: Vec<MultisigId>,
+    ) -> Result<(), Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>>
+    {
+        let pegout_id = pegout.id;
+        let candidates: Sorted<_> = candidates.into();
+
+        self.layer
+            .insert_unassigned(pegout, candidates.clone(), self.data)?;
 
         self.aux_msgs.push(AuxEvent::InitiatedPegout {
-            multisig,
-            pegout: pegout.id,
+            pegout: pegout_id,
+            candidates,
         });
+
+        Ok(())
+    }
+    pub fn insert_pegout_proposal(
+        &mut self,
+        proposal: ProposalEntry,
+    ) -> Result<(), Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>>
+    {
+        let prev_proposal = self.data.get_proposal(&proposal.txid)?;
+
+        self.layer
+            .insert_pegout_proposal(proposal.clone(), prev_proposal, self.data)?;
+
+        self.aux_msgs.push(AuxEvent::SubmittedProposal { proposal });
 
         Ok(())
     }
@@ -619,10 +714,12 @@ where
         &mut self,
         block_hash: BlockHash,
         parent_hash: BlockHash,
-    ) -> Result<(), Error<D::Error, A::BackendError>> {
-        // VALIDATE: Insert the Bitcoin header into the commitment layer. We're
-        // just using an empty Txid list.
-        self.layer.bitcoin_header(&block_hash, &vec![].into())?;
+        height: u64,
+    ) -> Result<(), Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>>
+    {
+        // VALIDATE: Block header is newly inserted.
+        self.layer
+            .insert_bitcoin_header(block_hash, height, self.data)?;
 
         self.aux_msgs.push(AuxEvent::NewBitcoinHeader {
             block_hash: block_hash.into(),
@@ -639,26 +736,30 @@ where
             return Ok(());
         }
 
+        // Retrieve all tracked Txids for that pruned block hash.
         for p in pruned {
-            // Retrieve all tracked Txids for that pruned block hash.
-            let txids: Sorted<Txid> = self.data.get_txids_by_block_hash(p.block_hash())?.into();
+            // TODO: The method should not return an `Option<_>`, but an error instead.
+            let txids: Sorted<Txid> = self
+                .data
+                .get_header(p.block_hash())?
+                .expect("header must exist")
+                .proposals;
 
             // Retrieve all pegouts for each Txid.
-            //
-            // NOTE: It's important that we only sort the inner pegout list; we
-            // must maintain the ordering of the Txid listing, such that each
-            // Txid corresponds to the correct pegout list.
             let pegouts: Vec<Sorted<PegoutWithId>> = txids
                 .iter()
-                .map(|txid| self.data.get_pegouts_by_txid(&txid).map(Into::into))
-                .collect::<Result<_, D::Error>>()?;
+                .map(|txid| {
+                    self.data
+                        .get_proposal(&txid)
+                        // TODO: Handle unwrap; this should not fail.
+                        .map(|p| p.unwrap().pegouts)
+                })
+                .collect::<Result<_, _>>()?;
 
             // VALIDATE: Prune headers from the commitment layer.
             match p {
                 BlockFate::Finalized(block_hash) => {
-                    // Finalized pegouts are gone and unspendable, indefinitely.
-                    self.layer
-                        .bitcoin_header_finalize(&block_hash, &txids, &pegouts)?;
+                    self.layer.finalize_bitcoin_header(block_hash, self.data)?;
 
                     let finalized: Sorted<PegoutId> = pegouts
                         .into_iter()
@@ -672,10 +773,7 @@ where
                     })
                 }
                 BlockFate::Orphaned(block_hash) => {
-                    // Orhpaned pegouts are moved into the *delayed* set, ready
-                    // to be spent again.
-                    self.layer
-                        .bitcoin_header_orphan(&block_hash, &txids, &pegouts)?;
+                    self.layer.orphan_bitcoin_header(block_hash, self.data)?;
 
                     let delayed: Sorted<PegoutId> = pegouts
                         .into_iter()
@@ -723,44 +821,29 @@ where
     /// - Data layer queries fail
     //
     // TODO: Add a variant that mandates a `CheckedBitcoinTransaction`.
-    pub fn register_bitcoin_tx_unchecked(
+    pub fn insert_bitcoin_tx_unchecked(
         &mut self,
         block_hash: BlockHash,
         tx: bitcoin::Transaction,
-        pegouts: Vec<PegoutId>,
-    ) -> Result<(), Error<D::Error, A::BackendError>> {
+        proposal: ProposalEntry,
+    ) -> Result<(), Error<D::BackendError, A::BackendError, <D::Transaction as DataSource>::Error>>
+    {
         // VALIDATE: Pegout list must not be empty.
-        if pegouts.is_empty() {
+        if proposal.pegouts.is_empty() {
             return Err(ValidationError::EmptyPegoutList.into());
         }
 
-        // Retrieve the full pegout data for each pegout Id.
-        let pegouts: Vec<PegoutWithId> = pegouts
-            .into_iter()
-            .map(|id| {
-                let data = self
-                    .data
-                    .get_pegout_by_id(&id)?
-                    .ok_or(ValidationError::PegoutDoesNotExist)?;
-
-                Ok(PegoutWithId { id, data })
-            })
-            .collect::<Result<_, Error<D::Error, A::BackendError>>>()?;
+        // TODO: Match actual proposal.
+        let computed_txid = tx.compute_txid();
 
         // Used for PegoutId duplicate checking.
         let mut used_ids = HashSet::new();
 
         // Convert lists to VecDeque since it's easier to work with.
         let mut queue_tx_out: VecDeque<TxOut> = VecDeque::from(tx.output.clone());
-        let mut queue_pegouts: VecDeque<PegoutWithId> = VecDeque::from(pegouts.clone());
+        let mut queue_pegouts: VecDeque<PegoutWithId> = VecDeque::from(proposal.pegouts.to_vec());
 
         while let Some((tx_out, pegout)) = queue_tx_out.pop_front().zip(queue_pegouts.pop_front()) {
-            // VALIDATE: The pegout is in an initiated state.
-            //
-            // This is essentially the sanity check; the later call to
-            // `BotanixLayer::register_bitcoin_tx` checks this internally as well.
-            self.layer.check_initiated_pegout(&MULTISIG, &pegout)?;
-
             // VALIDATE: Output value must be equal or less (fee-adjustment)
             // then the pegout amount.
             if pegout.data.amount < tx_out.value {
@@ -802,43 +885,18 @@ where
         debug_assert!(queue_pegouts.is_empty());
         debug_assert!(queue_tx_out.is_empty());
 
-        let computed_txid = tx.compute_txid();
-
-        // Retrieve any tracked Txids for the given block hash.
-        let tracked_txids = self.data.get_txids_by_block_hash(&block_hash)?;
-
-        // VALIDATE: Txis has not been registered already.
-        // NOTE: The commitment layer checks this as well.
-        if tracked_txids.contains(&computed_txid) {
-            return Err(ValidationError::TxidAlreadyRegistered.into());
-        }
-
-        // Construct updated Txids for the given block hash.
-        let mut updated_txids = tracked_txids.clone();
-        updated_txids.push(computed_txid);
-
-        // Sort lists appropriately.
-        let tracked_txids: Sorted<Txid> = tracked_txids.into();
-        let updated_txids: Sorted<Txid> = updated_txids.into();
-        let pegouts: Sorted<PegoutWithId> = pegouts.into();
-
-        // COMMIT: Register Bitcoin transaction with the commitment layer.
-        self.layer.register_bitcoin_tx(
-            &block_hash,
-            &MULTISIG,
-            &tracked_txids,
-            &updated_txids,
-            &computed_txid,
-            &pegouts,
-        )?;
-
-        let pegouts: Sorted<PegoutId> = pegouts.into_iter().map(|pegout| pegout.id).collect();
+        let aux_pegouts: Sorted<PegoutId> =
+            proposal.pegouts.iter().map(|pegout| pegout.id).collect();
 
         self.aux_msgs.push(AuxEvent::RegisterBitcoinTx {
             block_hash: block_hash.into(),
-            txid: computed_txid.into(),
-            pegouts,
+            txid: proposal.txid,
+            pegouts: aux_pegouts,
         });
+
+        // COMMIT: Register Bitcoin transaction with the commitment layer.
+        self.layer
+            .register_bitcoin_tx(block_hash, proposal, self.data)?;
 
         Ok(())
     }
