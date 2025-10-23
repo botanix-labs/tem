@@ -21,13 +21,13 @@
 //! state synchronization and efficient querying of historical state changes.
 use crate::{
     foundation::{
-        CommitmentStateRoot,
-        commitment::{MultisigId, entry::ToTranscript, sorted::Sorted},
+        CommitHasher, CommitmentStateRoot,
+        commitment::{MultisigId, sorted::Sorted},
+        component::{ToCommit, pegout::ProposalEntry},
     },
     validation::pegout::PegoutId,
 };
 use bitcoin::{BlockHash, Txid};
-use merlin::Transcript;
 
 /// A 32-byte cryptographic commitment to the complete Foundation Layer state.
 ///
@@ -78,13 +78,13 @@ impl FoundationStateProof {
     ///
     /// A 32-byte root hash representing the complete Foundation state
     pub fn compute_root(&self) -> FoundationStateRoot {
-        let mut t = Transcript::new(b"botanix:foundation_state_proof");
+        let mut h = CommitHasher::new(b"botanix:foundation_state_proof");
 
         // Context
-        t.append_u64(b"context:height", self.context.height); // Important!
+        h.append_u64(b"context:height", self.context.height); // Important!
 
         // Commitment layer.
-        t.append_message(b"commitments_root", self.commitments.as_ref());
+        h.append_message(b"commitments_root", self.commitments.as_ref());
 
         // Tracked Bitcoin headers.
         self.bitcoin_headers
@@ -92,7 +92,7 @@ impl FoundationStateProof {
             .collect::<Sorted<_>>()
             .iter()
             .for_each(|block_hash| {
-                block_hash.append_to_transcript(&mut t);
+                block_hash.append_to_commit(&mut h);
             });
 
         // Auxiliary events.
@@ -101,13 +101,10 @@ impl FoundationStateProof {
             .collect::<Sorted<_>>()
             .iter()
             .for_each(|aux| {
-                aux.append_to_transcript(&mut t);
+                aux.append_to_commit(&mut h);
             });
 
-        let mut root = [0u8; 32];
-        t.challenge_bytes(b"final_root", &mut root);
-
-        FoundationStateRoot(root)
+        FoundationStateRoot(h.finalize())
     }
 }
 
@@ -119,14 +116,19 @@ pub enum AuxEvent {
     /// Transitions the pegout to the "initiated" state where it can be included
     /// in Bitcoin transactions by the multisig federation.
     InitiatedPegout {
-        multisig: MultisigId,
         pegout: PegoutId,
+        candidates: Sorted<MultisigId>,
+    },
+    SubmittedProposal {
+        proposal: ProposalEntry,
     },
     /// A new Bitcoin block header has been received and is being tracked.
     ///
     /// Adds the block to the fork detection system for monitoring transaction
     /// confirmations and handling potential reorganizations.
-    NewBitcoinHeader { block_hash: BlockHash },
+    NewBitcoinHeader {
+        block_hash: BlockHash,
+    },
     /// A Bitcoin transaction has been registered with its associated pegouts.
     ///
     /// Transitions included pegouts from "initiated" to "pending" state while
@@ -154,50 +156,54 @@ pub enum AuxEvent {
     },
 }
 
-impl ToTranscript for AuxEvent {
-    fn append_to_transcript(&self, t: &mut merlin::Transcript) {
+impl ToCommit for AuxEvent {
+    fn append_to_commit(&self, h: &mut CommitHasher) {
         match self {
-            AuxEvent::InitiatedPegout { multisig, pegout } => {
-                t.append_message(b"aux_event:initiated_pegout", b"");
-                multisig.append_to_transcript(t);
-                pegout.append_to_transcript(t);
+            AuxEvent::InitiatedPegout { pegout, candidates } => {
+                h.append_message(b"aux_event:initiated_pegout", b"");
+                pegout.append_to_commit(h);
+                candidates.append_to_commit(h);
+            }
+            AuxEvent::SubmittedProposal { proposal } => {
+                h.append_message(b"aux_event:submitted_proposal", b"");
+                proposal.append_to_commit(h);
             }
             AuxEvent::NewBitcoinHeader { block_hash } => {
-                t.append_message(b"aux_event:new_bitcoin_header", b"");
-                block_hash.append_to_transcript(t);
+                h.append_message(b"aux_event:new_bitcoin_header", b"");
+                block_hash.append_to_commit(h);
             }
             AuxEvent::RegisterBitcoinTx {
                 block_hash,
                 txid,
                 pegouts,
             } => {
-                t.append_message(b"aux_event:register_bitcoin_tx", b"");
-                block_hash.append_to_transcript(t);
-                txid.append_to_transcript(t);
-                pegouts.append_to_transcript(t);
+                h.append_message(b"aux_event:register_bitcoin_tx", b"");
+                block_hash.append_to_commit(h);
+                txid.append_to_commit(h);
+                pegouts.append_to_commit(h);
             }
             AuxEvent::FinalizedBitcoinHeader {
                 block_hash,
                 finalized,
             } => {
-                t.append_message(b"aux_event:finalized_bitcoin_header", b"");
-                block_hash.append_to_transcript(t);
-                finalized.append_to_transcript(t);
+                h.append_message(b"aux_event:finalized_bitcoin_header", b"");
+                block_hash.append_to_commit(h);
+                finalized.append_to_commit(h);
             }
             AuxEvent::OrphanedBitcoinHeader {
                 block_hash,
                 delayed,
             } => {
-                t.append_message(b"aux_event:orphaned_bitcoin_header", b"");
-                block_hash.append_to_transcript(t);
-                delayed.append_to_transcript(t);
+                h.append_message(b"aux_event:orphaned_bitcoin_header", b"");
+                block_hash.append_to_commit(h);
+                delayed.append_to_commit(h);
             }
         }
     }
 }
 
-#[cfg(test)]
-pub mod tests {
+// TODO: Hide behind feature/cfg guard?
+pub mod test_utils {
     use super::*;
     use rand::Rng;
 
