@@ -18,8 +18,7 @@
 //! The trie layer enforces strict consistency rules that prevent common attack
 //! vectors in state management systems, including double-spending prevention
 //! and unauthorized state modifications.
-
-use super::{AliasFatDBMut, AliasMemoryDB, AliasTrieHash, CommitSchema, entry::Entry};
+use super::{AliasFatDBMut, CommitSchema};
 use trie_db::TrieMut;
 
 /// Trie operation errors.
@@ -27,12 +26,12 @@ use trie_db::TrieMut;
 /// Distinguishes between logical constraint violations (which may indicate
 /// malicious behavior) and backend infrastructure failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error<'a> {
+pub enum Error<T> {
     /// State modification violated trie consistency constraints.
     ///
     /// These errors indicate the attempted operation would create an invalid
     /// state or violate expected preconditions.
-    Mod { entry: Entry<'a>, kind: ErrorKind },
+    Mod { partition: T, kind: ErrorKind },
     /// Backend trie database failure.
     ///
     /// Represents infrastructure issues rather than logical errors.
@@ -66,15 +65,68 @@ pub enum ErrorKind {
     EnsureNotExistsDoesExist,
 }
 
-impl<'a> From<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>> for Error<'a> {
+impl<T> From<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>> for Error<T> {
     fn from(err: trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>) -> Self {
         Error::Fatal(err)
     }
 }
 
-impl<'a> From<Box<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>>> for Error<'a> {
+impl<T> From<Box<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>>> for Error<T> {
     fn from(err: Box<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>>) -> Self {
         Error::Fatal(*err)
+    }
+}
+
+pub trait EntryT {
+    type PartitionName;
+
+    fn as_key(&self) -> StorageKey;
+    fn as_value(&self) -> StorageValue;
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> Self::PartitionName;
+}
+
+/// 32-byte cryptographic commitment to a trie entry key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageKey([u8; 32]);
+
+impl AsRef<[u8]> for StorageKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for StorageKey {
+    fn from(value: [u8; 32]) -> Self {
+        StorageKey(value)
+    }
+}
+
+/// 32-byte cryptographic commitment to a trie entry value.  
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageValue([u8; 32]);
+
+impl AsRef<[u8]> for StorageValue {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for StorageValue {
+    fn from(value: [u8; 32]) -> Self {
+        StorageValue(value)
+    }
+}
+
+/// A 32-byte cryptographic commitment to a trie state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitmentStateRoot([u8; 32]);
+
+impl AsRef<[u8; 32]> for CommitmentStateRoot {
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -93,14 +145,6 @@ impl<'db> From<AliasFatDBMut<'db>> for TrieLayer<'db> {
     }
 }
 
-impl<'db> From<(&'db mut AliasMemoryDB, &'db mut AliasTrieHash)> for TrieLayer<'db> {
-    fn from(value: (&'db mut AliasMemoryDB, &'db mut AliasTrieHash)) -> Self {
-        let (db, root) = value;
-        let fat = AliasFatDBMut::from_existing(db, root);
-        Self::from(fat)
-    }
-}
-
 impl<'db> TrieLayer<'db> {
     /// Inserts a new entry that must not already exist.
     ///
@@ -110,12 +154,16 @@ impl<'db> TrieLayer<'db> {
     /// # Errors
     ///
     /// Returns `InsertDoesExist` if an entry with the same key already exists.
-    pub fn insert_non_existing<'b>(&mut self, entry: Entry<'b>) -> Result<(), Error<'b>> {
+    // TODO: Rename lifetime to 'a
+    pub fn insert_non_existing<E: EntryT>(
+        &mut self,
+        entry: E,
+    ) -> Result<(), Error<E::PartitionName>> {
         let (key, val) = entry.as_key_value();
 
         if self.trie.contains(key.as_ref())? {
             return Err(Error::Mod {
-                entry,
+                partition: entry.partition_name(),
                 kind: ErrorKind::InsertDoesExist,
             });
         }
@@ -139,17 +187,18 @@ impl<'db> TrieLayer<'db> {
     /// - `UpdateBadPrevKey` if the keys don't match
     /// - `UpdateNotExist` if no entry exists at the key
     /// - `UpdateBadPrevValue` if the existing value doesn't match expected
-    pub fn update_existing<'b>(
+    pub fn update_existing<E: EntryT>(
         &mut self,
-        new: Entry<'b>,
-        previous: Entry<'b>,
-    ) -> Result<(), Error<'b>> {
+        new: E,
+        previous: E,
+    ) -> Result<(), Error<E::PartitionName>> {
         let (key, val) = new.as_key_value();
         let (prev_key, prev_val) = previous.as_key_value();
 
         if key != prev_key {
             return Err(Error::Mod {
-                entry: previous,
+                partition: new.partition_name(),
+                // TODO: This is the wrong kind!
                 kind: ErrorKind::UpdateBadPrevKey,
             });
         }
@@ -158,7 +207,7 @@ impl<'db> TrieLayer<'db> {
             .trie
             .get(key.as_ref())?
             .ok_or(Error::Mod {
-                entry: previous,
+                partition: new.partition_name(),
                 kind: ErrorKind::UpdateNotExist,
             })?
             .try_into()
@@ -166,7 +215,7 @@ impl<'db> TrieLayer<'db> {
 
         if retrieved != prev_val.as_ref() {
             return Err(Error::Mod {
-                entry: previous,
+                partition: new.partition_name(),
                 kind: ErrorKind::UpdateBadPrevValue,
             });
         }
@@ -185,14 +234,14 @@ impl<'db> TrieLayer<'db> {
     ///
     /// - `RemoveNotExist` if no entry exists at the key
     /// - `RemoveBadValue` if the existing value doesn't match expected
-    pub fn remove_existing<'b>(&mut self, entry: Entry<'b>) -> Result<(), Error<'b>> {
+    pub fn remove_existing<E: EntryT>(&mut self, entry: E) -> Result<(), Error<E::PartitionName>> {
         let (key, val) = entry.as_key_value();
 
         let retrieved: [u8; 32] = self
             .trie
             .get(key.as_ref())?
             .ok_or(Error::Mod {
-                entry,
+                partition: entry.partition_name(),
                 kind: ErrorKind::RemoveNotExist,
             })?
             .try_into()
@@ -200,7 +249,7 @@ impl<'db> TrieLayer<'db> {
 
         if retrieved != val.as_ref() {
             return Err(Error::Mod {
-                entry,
+                partition: entry.partition_name(),
                 kind: ErrorKind::RemoveBadValue,
             });
         }
@@ -220,14 +269,14 @@ impl<'db> TrieLayer<'db> {
     ///
     /// - `EnsureExistsNotExist` if no entry exists at the key
     /// - `EnsureExistsBadValue` if entry exists but has wrong value
-    pub fn ensure_existing<'b>(&self, entry: Entry<'b>) -> Result<(), Error<'b>> {
+    pub fn ensure_existing<E: EntryT>(&self, entry: E) -> Result<(), Error<E::PartitionName>> {
         let (key, val) = entry.as_key_value();
 
         let retrieved: [u8; 32] = self
             .trie
             .get(key.as_ref())?
             .ok_or(Error::Mod {
-                entry,
+                partition: entry.partition_name(),
                 kind: ErrorKind::EnsureExistsNotExist,
             })?
             .try_into()
@@ -237,7 +286,7 @@ impl<'db> TrieLayer<'db> {
             Ok(())
         } else {
             Err(Error::Mod {
-                entry,
+                partition: entry.partition_name(),
                 kind: ErrorKind::EnsureExistsBadValue,
             })
         }
@@ -251,7 +300,7 @@ impl<'db> TrieLayer<'db> {
     ///
     /// Returns `EnsureNotExistsDoesExist` if an entry with the exact
     /// key and value already exists.
-    pub fn ensure_non_existing<'b>(&self, entry: Entry<'b>) -> Result<(), Error<'b>> {
+    pub fn ensure_non_existing<E: EntryT>(&self, entry: E) -> Result<(), Error<E::PartitionName>> {
         let (key, val) = entry.as_key_value();
 
         let Some(res) = self.trie.get(key.as_ref())? else {
@@ -262,7 +311,7 @@ impl<'db> TrieLayer<'db> {
 
         if retrieved == val.as_ref() {
             Err(Error::Mod {
-                entry,
+                partition: entry.partition_name(),
                 kind: ErrorKind::EnsureNotExistsDoesExist,
             })
         } else {
@@ -273,7 +322,8 @@ impl<'db> TrieLayer<'db> {
     ///
     /// The root hash represents the cryptographic commitment to all
     /// data in the trie and changes with any modification.
-    pub fn root(&mut self) -> &AliasTrieHash {
-        self.trie.root()
+    pub fn root(&mut self) -> CommitmentStateRoot {
+        let root: [u8; 32] = *self.trie.root();
+        CommitmentStateRoot(root)
     }
 }

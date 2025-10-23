@@ -87,21 +87,24 @@ pub mod structs;
 pub mod tem;
 pub mod validation;
 
-#[cfg(test)]
-mod tests {
+// TODO: Hide behind feature/cfg guard?
+pub mod test_utils {
+    use crate::{
+        foundation::proof::FoundationStateRoot,
+        validation::pegout::{PegoutData, PegoutId, PegoutWithId},
+    };
     use alloy_primitives::TxHash;
     use bitcoin::{
         BlockHash, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, WPubkeyHash, Witness,
     };
     use rand::Rng;
 
-    use crate::validation::pegout::{PegoutData, PegoutId, PegoutWithId};
+    // Re-export
+    pub use crate::foundation::proof::test_utils::gen_foundation_state_root;
 
     pub fn gen_bitcoin_tx_from_pegouts(pegouts: &[&PegoutData]) -> bitcoin::Transaction {
         let mut input = vec![];
         for _ in 0..rand::rng().random_range(1..5) {
-            let vout = rand::rng().random_range(0..4_000);
-
             // Mimicking a P2WPKH input; first item is the signature+sighash, second
             // item is the compressed public key.
             let witness: [Vec<u8>; 2] = [
@@ -110,10 +113,7 @@ mod tests {
             ];
 
             let txin = TxIn {
-                previous_output: OutPoint {
-                    txid: gen_bitcoin_txid(),
-                    vout,
-                },
+                previous_output: gen_bitcoin_utxo(),
                 script_sig: ScriptBuf::new(),
                 sequence: Sequence::MAX,
                 witness: Witness::from_slice(&witness),
@@ -154,6 +154,13 @@ mod tests {
         let r = rand::rng().random::<[u8; 32]>();
         let h = Hash::from_bytes_ref(&r);
         Txid::from_raw_hash(*h)
+    }
+
+    pub fn gen_bitcoin_utxo() -> OutPoint {
+        OutPoint {
+            txid: gen_bitcoin_txid(),
+            vout: rand::rng().random::<u32>(),
+        }
     }
 
     pub fn gen_botanix_hash() -> TxHash {
