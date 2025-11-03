@@ -1,16 +1,17 @@
 use crate::{
     foundation::{
-        AtomicError, CommitHasher,
+        CommitHasher,
         commitment::{
-            CommitSchema, MultisigId,
+            AliasFatDBMut, CommitSchema, MultisigId,
             sorted::Sorted,
-            trie::{CommitmentStateRoot, TrieLayer},
+            trie::{self, CommitmentStateRoot, EntryT, TrieLayer},
         },
-        component::pegout::DataSourceError,
     },
     validation::pegout::{PegoutData, PegoutId, PegoutWithId},
 };
 use bitcoin::hashes::Hash;
+use hash_db::HashDB;
+use trie_db::DBValue;
 
 pub mod pegout;
 
@@ -128,73 +129,184 @@ impl ToCommit for PegoutWithId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendError<T> {
+    Database(DatabaseError<T>),
+    Fatal(trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseError<T>(pub T);
+
+impl<D> From<D> for DatabaseError<D> {
+    fn from(value: D) -> Self {
+        DatabaseError(value)
+    }
+}
+
+/// A checked type returned by [`BotanixLayer`].
+// TODO: Should be in it's own private module!
+pub struct Checked<T>(/*PRIVATE*/ T);
+
+impl<T> Checked<T> {
+    pub fn consume(self) -> T {
+        self.0
+    }
+}
+
+impl<T> AsRef<T> for Checked<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::Deref for Checked<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Checked<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub enum BotanixLayerError<D> {
+    Validation {
+        partition: &'static str,
+        kind: trie::ErrorKind,
+    },
+    NotExists,
+    Database(DatabaseError<D>),
+    Fatal(trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>),
+}
+
+impl<D> From<DatabaseError<D>> for BotanixLayerError<D> {
+    fn from(err: DatabaseError<D>) -> Self {
+        BotanixLayerError::Database(err)
+    }
+}
+
+impl<D> From<trie::Error> for BotanixLayerError<D> {
+    fn from(err: trie::Error) -> Self {
+        match err {
+            trie::Error::Mod { partition, kind } => {
+                BotanixLayerError::Validation { partition, kind }
+            }
+            trie::Error::Fatal(err) => {
+                //
+                BotanixLayerError::Fatal(err)
+            }
+        }
+    }
+}
+
 /// Higher-level interface for Botanix state operations within the commitment
 /// trie.
 ///
 /// Provides validated operations for pegout lifecycle management and Bitcoin
 /// block processing. All methods include comprehensive state validation to
 /// prevent invalid transitions and maintain trie consistency.
-// TODO: Document how this should be constructed.
-pub struct BotanixLayer<'db> {
-    /* PRIVATE */ trie: TrieLayer<'db>,
+// TODO: Move this to it's own separate module, so it's inner fields are not exposed.
+pub struct BotanixLayer<'db, DB> {
+    db: &'db mut DB,
+    root: &'db mut [u8; 32],
 }
 
-impl<'db> From<TrieLayer<'db>> for BotanixLayer<'db> {
-    fn from(trie: TrieLayer<'db>) -> Self {
-        BotanixLayer { trie }
+impl<'db, DB> BotanixLayer<'db, DB>
+where
+    DB: HashDB<CommitHasher, DBValue>,
+{
+    pub fn new(db: &'db mut DB, root: &'db mut [u8; 32]) -> Self {
+        BotanixLayer { db, root }
     }
-}
-
-impl<'db> BotanixLayer<'db> {
     pub fn root(&mut self) -> CommitmentStateRoot {
-        self.trie.root()
+        let mut trie: TrieLayer<'_> = AliasFatDBMut::from_existing(self.db, self.root).into();
+        trie.root()
     }
-}
+    pub fn get_checked<F, E, D>(&mut self, f: F) -> Result<Checked<E>, BotanixLayerError<D>>
+    where
+        E: EntryT,
+        F: FnOnce(&mut DB) -> Result<Option<E>, DatabaseError<D>>,
+    {
+        // Retrieve the data from the DB via the closure.
+        let entry = f(&mut self.db)?.ok_or(BotanixLayerError::NotExists)?;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BackendError<D> {
-    DataSource(DataSourceError<D>),
-    Fatal(trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>),
-}
+        // Validate entry against the Trie state.
+        let trie: TrieLayer<'_> = AliasFatDBMut::from_existing(self.db, self.root).into();
+        trie.ensure_existing(&entry)?;
 
-impl<D> From<DataSourceError<D>> for BackendError<D> {
-    fn from(err: DataSourceError<D>) -> Self {
-        BackendError::DataSource(err)
+        Ok(Checked(entry))
     }
-}
+    pub fn get_checked_optional<F, E, D>(
+        &mut self,
+        f: F,
+    ) -> Result<Option<Checked<E>>, BotanixLayerError<D>>
+    where
+        E: EntryT,
+        F: FnOnce(&mut DB) -> Result<Option<E>, DatabaseError<D>>,
+    {
+        // Retrieve the data from the DB via the closure.
+        let Some(entry) = f(&mut self.db)? else {
+            return Ok(None);
+        };
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct DataLayerError<D>(pub AtomicError<D>);
+        // Validate entry against the Trie state.
+        let trie: TrieLayer<'_> = AliasFatDBMut::from_existing(self.db, self.root).into();
+        trie.ensure_existing(&entry)?;
 
-impl<D> From<AtomicError<D>> for DataLayerError<D> {
-    fn from(err: AtomicError<D>) -> Self {
-        DataLayerError(err)
+        Ok(Some(Checked(entry)))
     }
-}
+    pub fn insert_checked<F, E, D>(&mut self, entry: E, f: F) -> Result<(), BotanixLayerError<D>>
+    where
+        E: EntryT,
+        F: FnOnce(&mut DB, Checked<E>) -> Result<(), DatabaseError<D>>,
+    {
+        // Validate entry against the Trie state.
+        {
+            let mut trie: TrieLayer<'_> = AliasFatDBMut::from_existing(self.db, self.root).into();
+            trie.insert_non_existing(&entry)?;
+        }
 
-pub trait AtomicDataLayer {
-    type Transaction;
-    /// Backend-specific error type for storage operations.
-    type BackendError;
+        // Insert the data into the DB via the closure.
+        f(&mut self.db, Checked(entry)).map_err(Into::into)
+    }
+    pub fn update_checked<F, E, D>(
+        &mut self,
+        entry: E,
+        prev: Checked<E>,
+        f: F,
+    ) -> Result<(), BotanixLayerError<D>>
+    where
+        E: EntryT,
+        F: FnOnce(&mut DB, Checked<E>) -> Result<(), DatabaseError<D>>,
+    {
+        // Validate entry against the Trie state.
+        {
+            let mut trie: TrieLayer<'_> = AliasFatDBMut::from_existing(self.db, self.root).into();
+            trie.update_existing(&entry, prev.as_ref())?;
+        }
 
-    /// Starts a new transaction and returns a mutable database layer.
-    ///
-    /// Only one transaction can be active at a time. The returned layer
-    /// provides access to modify the database state without affecting the
-    /// committed state until `commit()` is called.
-    fn start_data_tx<'tx>(
-        &'tx mut self,
-    ) -> Result<&'tx mut Self::Transaction, DataLayerError<Self::BackendError>>;
+        // Insert the data into the DB via the closure.
+        f(&mut self.db, Checked(entry)).map_err(Into::into)
+    }
+    // TODO: Consider wrapping `E` in `Checked<E>`?
+    pub fn remove_checked<F, E, D>(&mut self, entry: E, f: F) -> Result<(), BotanixLayerError<D>>
+    where
+        E: EntryT,
+        F: FnOnce(&mut DB, Checked<E>) -> Result<(), DatabaseError<D>>,
+    {
+        // Validate entry against the Trie state.
+        {
+            let mut trie: TrieLayer<'_> = AliasFatDBMut::from_existing(self.db, self.root).into();
+            trie.remove_existing(&entry)?;
+        }
 
-    /// Commits the current transaction.
-    ///
-    /// Persists all changes made through the transaction layer. The transaction
-    /// must be started before calling commit.
-    fn commit(&mut self) -> Result<(), DataLayerError<Self::BackendError>>;
-
-    /// Rolls back the current transaction.
-    ///
-    /// Discards all changes made through the transaction layer and restores the
-    /// storage to its state before the transaction began.
-    fn rollback(&mut self) -> Result<(), DataLayerError<Self::BackendError>>;
+        // Remove the data from the DB via the closure, returning the removed
+        // entry.
+        f(&mut self.db, Checked(entry)).map_err(Into::into)
+    }
 }
