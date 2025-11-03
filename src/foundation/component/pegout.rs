@@ -351,49 +351,63 @@ pub trait DataSource {
 
     fn insert_unassigned(
         &mut self,
-        pegout: &PegoutId,
-        entry: UnassignedEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EUnassigned>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_unassigned(
         &mut self,
         pegout: &PegoutId,
-    ) -> Result<Option<UnassignedEntry>, DataSourceError<Self::Error>>;
-    fn remove_unassigned(&mut self, pegout: &PegoutId) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EUnassigned>, DatabaseError<Self::Error>>;
+    fn remove_unassigned(
+        &mut self,
+        entry: Checked<EUnassigned>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     //
     fn insert_utxo(
         &mut self,
-        utxo: &OutPoint,
-        entry: OnchainUtxoEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_utxo(
         &mut self,
         utxo: &OutPoint,
-    ) -> Result<Option<OnchainUtxoEntry>, DataSourceError<Self::Error>>;
-    fn finalize_utxo(&mut self, utxo: &OutPoint) -> Result<(), DataSourceError<Self::Error>>;
-    fn orphan_utxo(&mut self, utxo: &OutPoint) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EOnchainUtxo>, DatabaseError<Self::Error>>;
+    fn finalize_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
+    fn orphan_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     //
     fn insert_header(
         &mut self,
-        block: &BlockHash,
-        entry: OnchainHeaderEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EOnchainHeader>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_header(
         &mut self,
         block: &BlockHash,
-    ) -> Result<Option<OnchainHeaderEntry>, DataSourceError<Self::Error>>;
-    fn remove_header(&mut self, block: &BlockHash) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EOnchainHeader>, DatabaseError<Self::Error>>;
+    fn remove_header(
+        &mut self,
+        entry: Checked<EOnchainHeader>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     //
     fn insert_pegout_proposal(
         &mut self,
-        txid: &Txid,
-        entry: ProposalEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_proposal(
         &mut self,
         txid: &Txid,
-    ) -> Result<Option<ProposalEntry>, DataSourceError<Self::Error>>;
-    fn finalize_proposal(&mut self, txid: &Txid) -> Result<(), DataSourceError<Self::Error>>;
-    fn orphan_proposal(&mut self, txid: &Txid) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EProposal>, DatabaseError<Self::Error>>;
+    fn finalize_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
+    fn orphan_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
 }
 
 impl<'db> BotanixLayer<'db> {
