@@ -37,18 +37,22 @@ use crate::{
             sorted::Sorted,
             trie::{self, EntryT, ErrorKind, StorageKey, StorageValue},
         },
-        component::{BotanixLayer, ToCommit},
+        component::{BotanixLayer, BotanixLayerError, Checked, DatabaseError, ToCommit},
     },
     validation::pegout::{PegoutId, PegoutWithId},
 };
 use bitcoin::{BlockHash, OutPoint, Txid};
+use hash_db::HashDB;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use trie_db::DBValue;
 
-const T_UNASSIGNED: &[u8] = b"pegout:unassigned";
-const T_PROPOSAL: &[u8] = b"pegout:proposal";
-const T_ONCHAIN_UTXO: &[u8] = b"pegout:onchain-utxo";
-const T_ONCHAIN_HEADER: &[u8] = b"pegout:onchain-header";
+const T_GLOBAL: &[u8] = b"commitment-trie";
+//
+const T_UNASSIGNED: &str = "pegout:unassigned";
+const T_PROPOSAL: &str = "pegout:proposal";
+const T_ONCHAIN_UTXO: &str = "pegout:onchain-utxo";
+const T_ONCHAIN_HEADER: &str = "pegout:onchain-header";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnassignedEntry {
@@ -78,43 +82,137 @@ pub struct OnchainHeaderEntry {
     pub proposals: Sorted<Txid>,
 }
 
-/// Trie entry representing different types of Foundation state data.
+/// Freshly initiated pegout on the Botanix EVM, or pegouts that have been
+/// orphaned and are not included in any competing proposal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PegoutEntry<'a> {
-    // Freshly initiated pegout on the Botanix EVM, or pegouts that have been
-    // orphaned and are not included in any competing proposal.
-    Unassigned {
-        k: &'a PegoutId,
-        v: &'a UnassignedEntry,
-    },
-    // Proposals are always tracked, whether they're on-chain or not (mempool).
-    // The only time a Proposal is removed is if gets finalized, or if a
-    // competing Proposal is finalized that has reused at least one Utxo -
-    // implying that this Proposal is orphaned!
-    Proposal {
-        k: &'a Txid,
-        v: &'a ProposalEntry,
-    },
-    // A Utxo that has been spotted on-chain. This is required to check for
-    // finalization events.
-    OnchainUtxo {
-        k: &'a OutPoint,
-        v: &'a OnchainUtxoEntry,
-    },
-    // A Header that has been spotted on-chain.
-    OnchainHeader {
-        k: &'a BlockHash,
-        v: &'a OnchainHeaderEntry,
-    },
+pub struct EUnassigned {
+    pub k: PegoutId,
+    pub v: UnassignedEntry,
 }
 
-// TODO: Rename and document.
+/// Proposals are always tracked, whether they're on-chain or not (mempool). The
+/// only time a Proposal is removed is if gets finalized, or if a competing
+/// Proposal is finalized that has reused at least one Utxo - implying that this
+/// Proposal is orphaned!
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntryNames {
-    Unassigned,
-    Proposal,
-    OnchainUtxo,
-    OnchainHeader,
+pub struct EProposal {
+    pub k: Txid,
+    pub v: ProposalEntry,
+}
+
+/// A Utxo that has been spotted on-chain. This is required to check for
+/// finalization events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EOnchainUtxo {
+    pub k: OutPoint,
+    pub v: OnchainUtxoEntry,
+}
+
+/// A Header that has been spotted on-chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EOnchainHeader {
+    pub k: BlockHash,
+    pub v: OnchainHeaderEntry,
+}
+
+impl EntryT for EUnassigned {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_UNASSIGNED.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_UNASSIGNED.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_UNASSIGNED
+    }
+}
+
+impl EntryT for EProposal {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_PROPOSAL.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_PROPOSAL.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_PROPOSAL
+    }
+}
+
+impl EntryT for EOnchainUtxo {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_UTXO.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_UTXO.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_ONCHAIN_UTXO
+    }
+}
+
+impl EntryT for EOnchainHeader {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_HEADER.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_HEADER.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_ONCHAIN_HEADER
+    }
 }
 
 // TODO: We have many error types, so each error type should be prefixed like
@@ -131,14 +229,33 @@ impl<D> From<ValidationError> for PegoutError<D> {
     }
 }
 
-impl<D> From<DataSourceError<D>> for PegoutError<D> {
-    fn from(err: DataSourceError<D>) -> Self {
-        PegoutError::BackendError(super::BackendError::DataSource(err))
+impl<D> From<DatabaseError<D>> for PegoutError<D> {
+    fn from(err: DatabaseError<D>) -> Self {
+        PegoutError::BackendError(super::BackendError::Database(err))
     }
 }
 
-impl<D> From<trie::Error<EntryNames>> for PegoutError<D> {
-    fn from(err: trie::Error<EntryNames>) -> Self {
+impl<D> From<BotanixLayerError<D>> for PegoutError<D> {
+    fn from(err: BotanixLayerError<D>) -> Self {
+        match err {
+            BotanixLayerError::Database(err) => {
+                PegoutError::BackendError(super::BackendError::Database(err))
+            }
+            BotanixLayerError::Fatal(err) => {
+                PegoutError::BackendError(super::BackendError::Fatal(err))
+            }
+            BotanixLayerError::NotExists => {
+                PegoutError::ValidationError(ValidationError::InvalidState)
+            }
+            BotanixLayerError::Validation { partition, kind } => {
+                PegoutError::ValidationError(ValidationError::StateError { partition, kind })
+            }
+        }
+    }
+}
+
+impl<D> From<trie::Error> for PegoutError<D> {
+    fn from(err: trie::Error) -> Self {
         match err {
             trie::Error::Mod { partition, kind } => {
                 PegoutError::ValidationError(ValidationError::StateError { partition, kind })
@@ -169,75 +286,11 @@ pub enum ValidationError {
     UtxoAlreadyInserted,
     UtxoBadPreviousRef,
     //
+    InvalidState,
     StateError {
-        partition: EntryNames,
+        partition: &'static str,
         kind: ErrorKind,
     },
-}
-
-impl<'a> EntryT for PegoutEntry<'a> {
-    type PartitionName = EntryNames;
-
-    /// Computes the cryptographic commitment for this entry's key.
-    ///
-    /// Uses Merlin transcript with domain separation by entry type to ensure
-    /// keys from different tables cannot collide even with identical input
-    /// data.
-    fn as_key(&self) -> StorageKey {
-        let mut h = CommitHasher::new(b"pegout-entry-key");
-
-        match self {
-            PegoutEntry::Unassigned { k, .. } => {
-                h.append_message(b"table", T_UNASSIGNED);
-                k.append_to_commit(&mut h);
-            }
-            PegoutEntry::Proposal { k, .. } => {
-                h.append_message(b"table", T_PROPOSAL);
-                k.append_to_commit(&mut h);
-            }
-            PegoutEntry::OnchainUtxo { k, .. } => {
-                h.append_message(b"table", T_ONCHAIN_UTXO);
-                k.append_to_commit(&mut h);
-            }
-            PegoutEntry::OnchainHeader { k, .. } => {
-                h.append_message(b"table", T_ONCHAIN_HEADER);
-                k.append_to_commit(&mut h);
-            }
-        }
-
-        StorageKey::from(h.finalize())
-    }
-
-    /// Computes the cryptographic commitment for this entry's value.
-    ///
-    /// Creates a deterministic hash of the entry's value data that can be used
-    /// for efficient equality comparisons in the trie.
-    fn as_value(&self) -> StorageValue {
-        let mut h = CommitHasher::new(b"pegout-entry-value");
-
-        match self {
-            PegoutEntry::Unassigned { v, .. } => v.append_to_commit(&mut h),
-            PegoutEntry::Proposal { v, .. } => v.append_to_commit(&mut h),
-            PegoutEntry::OnchainUtxo { v, .. } => v.append_to_commit(&mut h),
-            PegoutEntry::OnchainHeader { v, .. } => v.append_to_commit(&mut h),
-        }
-
-        StorageValue::from(h.finalize())
-    }
-
-    /// Returns both the key and value commitments for this entry.
-    fn as_key_value(&self) -> (StorageKey, StorageValue) {
-        (self.as_key(), self.as_value())
-    }
-
-    fn partition_name(&self) -> Self::PartitionName {
-        match self {
-            PegoutEntry::Unassigned { .. } => EntryNames::Unassigned,
-            PegoutEntry::Proposal { .. } => EntryNames::Proposal,
-            PegoutEntry::OnchainUtxo { .. } => EntryNames::OnchainUtxo,
-            PegoutEntry::OnchainHeader { .. } => EntryNames::OnchainHeader,
-        }
-    }
 }
 
 impl ToCommit for UnassignedEntry {
@@ -293,18 +346,6 @@ impl ToCommit for OnchainHeaderEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DataSourceError<D>(pub D);
-
-// TODO: Implement this for the other *Error wrappers as well.
-impl<D> From<D> for DataSourceError<D> {
-    fn from(value: D) -> Self {
-        DataSourceError(value)
-    }
-}
-
-// TODO: Those methods should never return an `Option<_>`, but an error instead.
-// If the value does not exist, then this should be an error; implying a bug.
 pub trait DataSource {
     type Error;
 
