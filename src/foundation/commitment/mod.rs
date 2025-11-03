@@ -11,8 +11,6 @@ use sha2::{Digest, Sha256};
 use trie_db::{Hasher, TrieLayout};
 
 pub mod atomic;
-pub mod fat_db;
-pub mod mem_db;
 pub mod sorted;
 pub mod trie;
 //
