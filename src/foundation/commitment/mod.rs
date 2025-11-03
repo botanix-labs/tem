@@ -20,9 +20,11 @@ mod node_codec;
 pub type MultisigId = u64;
 
 /// Low-level alias for Parity's in-memory trie database.
-type AliasMemoryDB = MemoryDB<CommitHasher, HashKey<CommitHasher>, Vec<u8>>;
+pub type AliasMemoryDB = MemoryDB<CommitHasher, HashKey<CommitHasher>, Vec<u8>>;
 /// Low-level alias for Parity's mutable database interface for state modifications.
-type AliasFatDBMut<'db> = trie_db::FatDBMut<'db, CommitSchema>;
+pub type AliasFatDBMut<'db> = trie_db::FatDBMut<'db, CommitSchema>;
+
+pub type DBKey = [u8; 32];
 
 #[derive(Debug, Clone)]
 pub struct CommitHasher {
@@ -34,16 +36,16 @@ impl CommitHasher {
     /// a key pointing to the "null-node" into the database on initialization.
     /// This is essentially the _root_ of an empty database.
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// // The null-node
     /// let value = [0u8];
-    /// let key = CommitHahser::hash(&value);
+    /// let key = CommitHasher::hash(&value);
     ///
     /// assert_eq!(key, CommitHasher::HASHED_NULL_NODE);
     /// ```
     //
     // See [`tests::commit_hasher_null_node`]
-    pub const HASHED_NULL_NODE: [u8; 32] = [
+    pub const HASHED_NULL_NODE: DBKey = [
         110, 52, 11, 156, 255, 179, 122, 152, 156, 165, 68, 230, 187, 120, 10, 44, 120, 144, 29,
         63, 179, 55, 56, 118, 133, 17, 163, 6, 23, 175, 160, 29,
     ];
@@ -63,13 +65,13 @@ impl CommitHasher {
         self.hasher.update(label);
         self.hasher.update(n.to_le_bytes());
     }
-    pub fn finalize(self) -> [u8; 32] {
+    pub fn finalize(self) -> DBKey {
         self.hasher.finalize().into()
     }
 }
 
 impl Hasher for CommitHasher {
-    type Out = [u8; 32];
+    type Out = DBKey;
     // We don't really need this:
     // > What to use to build `HashMap`s with this `Hasher`.
     type StdHasher = std::collections::hash_map::DefaultHasher;
