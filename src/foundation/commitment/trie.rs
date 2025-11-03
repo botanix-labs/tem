@@ -26,12 +26,15 @@ use trie_db::TrieMut;
 /// Distinguishes between logical constraint violations (which may indicate
 /// malicious behavior) and backend infrastructure failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error<T> {
+pub enum Error {
     /// State modification violated trie consistency constraints.
     ///
     /// These errors indicate the attempted operation would create an invalid
     /// state or violate expected preconditions.
-    Mod { partition: T, kind: ErrorKind },
+    Mod {
+        partition: &'static str,
+        kind: ErrorKind,
+    },
     /// Backend trie database failure.
     ///
     /// Represents infrastructure issues rather than logical errors.
@@ -65,27 +68,35 @@ pub enum ErrorKind {
     EnsureNotExistsDoesExist,
 }
 
-impl<T> From<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>> for Error<T> {
+impl From<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>> for Error {
     fn from(err: trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>) -> Self {
         Error::Fatal(err)
     }
 }
 
-impl<T> From<Box<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>>> for Error<T> {
+impl From<Box<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>>> for Error {
     fn from(err: Box<trie_db::TrieError<[u8; 32], trie_db::CError<CommitSchema>>>) -> Self {
         Error::Fatal(*err)
     }
 }
 
 pub trait EntryT {
-    type PartitionName;
-
+    /// Computes the cryptographic commitment for this entry's key.
+    ///
+    /// Uses Merlin transcript with domain separation by entry type to ensure
+    /// keys from different tables cannot collide even with identical input
+    /// data.
     fn as_key(&self) -> StorageKey;
+    /// Computes the cryptographic commitment for this entry's value.
+    ///
+    /// Creates a deterministic hash of the entry's value data that can be used
+    /// for efficient equality comparisons in the trie.
     fn as_value(&self) -> StorageValue;
+    /// Returns both the key and value commitments for this entry.
     fn as_key_value(&self) -> (StorageKey, StorageValue) {
         (self.as_key(), self.as_value())
     }
-    fn partition_name(&self) -> Self::PartitionName;
+    fn partition_name(&self) -> &'static str;
 }
 
 /// 32-byte cryptographic commitment to a trie entry key.
@@ -155,10 +166,7 @@ impl<'db> TrieLayer<'db> {
     ///
     /// Returns `InsertDoesExist` if an entry with the same key already exists.
     // TODO: Rename lifetime to 'a
-    pub fn insert_non_existing<E: EntryT>(
-        &mut self,
-        entry: E,
-    ) -> Result<(), Error<E::PartitionName>> {
+    pub fn insert_non_existing<E: EntryT>(&mut self, entry: &E) -> Result<(), Error> {
         let (key, val) = entry.as_key_value();
 
         if self.trie.contains(key.as_ref())? {
@@ -187,11 +195,7 @@ impl<'db> TrieLayer<'db> {
     /// - `UpdateBadPrevKey` if the keys don't match
     /// - `UpdateNotExist` if no entry exists at the key
     /// - `UpdateBadPrevValue` if the existing value doesn't match expected
-    pub fn update_existing<E: EntryT>(
-        &mut self,
-        new: E,
-        previous: E,
-    ) -> Result<(), Error<E::PartitionName>> {
+    pub fn update_existing<E: EntryT>(&mut self, new: &E, previous: &E) -> Result<(), Error> {
         let (key, val) = new.as_key_value();
         let (prev_key, prev_val) = previous.as_key_value();
 
@@ -234,7 +238,7 @@ impl<'db> TrieLayer<'db> {
     ///
     /// - `RemoveNotExist` if no entry exists at the key
     /// - `RemoveBadValue` if the existing value doesn't match expected
-    pub fn remove_existing<E: EntryT>(&mut self, entry: E) -> Result<(), Error<E::PartitionName>> {
+    pub fn remove_existing<E: EntryT>(&mut self, entry: &E) -> Result<(), Error> {
         let (key, val) = entry.as_key_value();
 
         let retrieved: [u8; 32] = self
@@ -269,7 +273,7 @@ impl<'db> TrieLayer<'db> {
     ///
     /// - `EnsureExistsNotExist` if no entry exists at the key
     /// - `EnsureExistsBadValue` if entry exists but has wrong value
-    pub fn ensure_existing<E: EntryT>(&self, entry: E) -> Result<(), Error<E::PartitionName>> {
+    pub fn ensure_existing<E: EntryT>(&self, entry: &E) -> Result<(), Error> {
         let (key, val) = entry.as_key_value();
 
         let retrieved: [u8; 32] = self
@@ -300,7 +304,7 @@ impl<'db> TrieLayer<'db> {
     ///
     /// Returns `EnsureNotExistsDoesExist` if an entry with the exact
     /// key and value already exists.
-    pub fn ensure_non_existing<E: EntryT>(&self, entry: E) -> Result<(), Error<E::PartitionName>> {
+    pub fn ensure_non_existing<E: EntryT>(&self, entry: &E) -> Result<(), Error> {
         let (key, val) = entry.as_key_value();
 
         let Some(res) = self.trie.get(key.as_ref())? else {

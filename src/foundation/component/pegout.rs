@@ -37,18 +37,22 @@ use crate::{
             sorted::Sorted,
             trie::{self, EntryT, ErrorKind, StorageKey, StorageValue},
         },
-        component::{BotanixLayer, ToCommit},
+        component::{BotanixLayer, BotanixLayerError, Checked, DatabaseError, ToCommit},
     },
     validation::pegout::{PegoutId, PegoutWithId},
 };
 use bitcoin::{BlockHash, OutPoint, Txid};
+use hash_db::HashDB;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use trie_db::DBValue;
 
-const T_UNASSIGNED: &[u8] = b"pegout:unassigned";
-const T_PROPOSAL: &[u8] = b"pegout:proposal";
-const T_ONCHAIN_UTXO: &[u8] = b"pegout:onchain-utxo";
-const T_ONCHAIN_HEADER: &[u8] = b"pegout:onchain-header";
+const T_GLOBAL: &[u8] = b"commitment-trie";
+//
+const T_UNASSIGNED: &str = "pegout:unassigned";
+const T_PROPOSAL: &str = "pegout:proposal";
+const T_ONCHAIN_UTXO: &str = "pegout:onchain-utxo";
+const T_ONCHAIN_HEADER: &str = "pegout:onchain-header";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnassignedEntry {
@@ -78,43 +82,137 @@ pub struct OnchainHeaderEntry {
     pub proposals: Sorted<Txid>,
 }
 
-/// Trie entry representing different types of Foundation state data.
+/// Freshly initiated pegout on the Botanix EVM, or pegouts that have been
+/// orphaned and are not included in any competing proposal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PegoutEntry<'a> {
-    // Freshly initiated pegout on the Botanix EVM, or pegouts that have been
-    // orphaned and are not included in any competing proposal.
-    Unassigned {
-        k: &'a PegoutId,
-        v: &'a UnassignedEntry,
-    },
-    // Proposals are always tracked, whether they're on-chain or not (mempool).
-    // The only time a Proposal is removed is if gets finalized, or if a
-    // competing Proposal is finalized that has reused at least one Utxo -
-    // implying that this Proposal is orphaned!
-    Proposal {
-        k: &'a Txid,
-        v: &'a ProposalEntry,
-    },
-    // A Utxo that has been spotted on-chain. This is required to check for
-    // finalization events.
-    OnchainUtxo {
-        k: &'a OutPoint,
-        v: &'a OnchainUtxoEntry,
-    },
-    // A Header that has been spotted on-chain.
-    OnchainHeader {
-        k: &'a BlockHash,
-        v: &'a OnchainHeaderEntry,
-    },
+pub struct EUnassigned {
+    pub k: PegoutId,
+    pub v: UnassignedEntry,
 }
 
-// TODO: Rename and document.
+/// Proposals are always tracked, whether they're on-chain or not (mempool). The
+/// only time a Proposal is removed is if gets finalized, or if a competing
+/// Proposal is finalized that has reused at least one Utxo - implying that this
+/// Proposal is orphaned!
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntryNames {
-    Unassigned,
-    Proposal,
-    OnchainUtxo,
-    OnchainHeader,
+pub struct EProposal {
+    pub k: Txid,
+    pub v: ProposalEntry,
+}
+
+/// A Utxo that has been spotted on-chain. This is required to check for
+/// finalization events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EOnchainUtxo {
+    pub k: OutPoint,
+    pub v: OnchainUtxoEntry,
+}
+
+/// A Header that has been spotted on-chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EOnchainHeader {
+    pub k: BlockHash,
+    pub v: OnchainHeaderEntry,
+}
+
+impl EntryT for EUnassigned {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_UNASSIGNED.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_UNASSIGNED.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_UNASSIGNED
+    }
+}
+
+impl EntryT for EProposal {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_PROPOSAL.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_PROPOSAL.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_PROPOSAL
+    }
+}
+
+impl EntryT for EOnchainUtxo {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_UTXO.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_UTXO.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_ONCHAIN_UTXO
+    }
+}
+
+impl EntryT for EOnchainHeader {
+    fn as_key(&self) -> StorageKey {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_HEADER.as_bytes());
+        self.k.append_to_commit(&mut h);
+        //
+        StorageKey::from(h.finalize())
+    }
+    fn as_value(&self) -> StorageValue {
+        let mut h = CommitHasher::new(T_GLOBAL);
+        //
+        h.append_message(b"table", T_ONCHAIN_HEADER.as_bytes());
+        self.v.append_to_commit(&mut h);
+        //
+        StorageValue::from(h.finalize())
+    }
+    fn as_key_value(&self) -> (StorageKey, StorageValue) {
+        (self.as_key(), self.as_value())
+    }
+    fn partition_name(&self) -> &'static str {
+        T_ONCHAIN_HEADER
+    }
 }
 
 // TODO: We have many error types, so each error type should be prefixed like
@@ -131,14 +229,33 @@ impl<D> From<ValidationError> for PegoutError<D> {
     }
 }
 
-impl<D> From<DataSourceError<D>> for PegoutError<D> {
-    fn from(err: DataSourceError<D>) -> Self {
-        PegoutError::BackendError(super::BackendError::DataSource(err))
+impl<D> From<DatabaseError<D>> for PegoutError<D> {
+    fn from(err: DatabaseError<D>) -> Self {
+        PegoutError::BackendError(super::BackendError::Database(err))
     }
 }
 
-impl<D> From<trie::Error<EntryNames>> for PegoutError<D> {
-    fn from(err: trie::Error<EntryNames>) -> Self {
+impl<D> From<BotanixLayerError<D>> for PegoutError<D> {
+    fn from(err: BotanixLayerError<D>) -> Self {
+        match err {
+            BotanixLayerError::Database(err) => {
+                PegoutError::BackendError(super::BackendError::Database(err))
+            }
+            BotanixLayerError::Fatal(err) => {
+                PegoutError::BackendError(super::BackendError::Fatal(err))
+            }
+            BotanixLayerError::NotExists => {
+                PegoutError::ValidationError(ValidationError::InvalidState)
+            }
+            BotanixLayerError::Validation { partition, kind } => {
+                PegoutError::ValidationError(ValidationError::StateError { partition, kind })
+            }
+        }
+    }
+}
+
+impl<D> From<trie::Error> for PegoutError<D> {
+    fn from(err: trie::Error) -> Self {
         match err {
             trie::Error::Mod { partition, kind } => {
                 PegoutError::ValidationError(ValidationError::StateError { partition, kind })
@@ -169,75 +286,11 @@ pub enum ValidationError {
     UtxoAlreadyInserted,
     UtxoBadPreviousRef,
     //
+    InvalidState,
     StateError {
-        partition: EntryNames,
+        partition: &'static str,
         kind: ErrorKind,
     },
-}
-
-impl<'a> EntryT for PegoutEntry<'a> {
-    type PartitionName = EntryNames;
-
-    /// Computes the cryptographic commitment for this entry's key.
-    ///
-    /// Uses Merlin transcript with domain separation by entry type to ensure
-    /// keys from different tables cannot collide even with identical input
-    /// data.
-    fn as_key(&self) -> StorageKey {
-        let mut h = CommitHasher::new(b"pegout-entry-key");
-
-        match self {
-            PegoutEntry::Unassigned { k, .. } => {
-                h.append_message(b"table", T_UNASSIGNED);
-                k.append_to_commit(&mut h);
-            }
-            PegoutEntry::Proposal { k, .. } => {
-                h.append_message(b"table", T_PROPOSAL);
-                k.append_to_commit(&mut h);
-            }
-            PegoutEntry::OnchainUtxo { k, .. } => {
-                h.append_message(b"table", T_ONCHAIN_UTXO);
-                k.append_to_commit(&mut h);
-            }
-            PegoutEntry::OnchainHeader { k, .. } => {
-                h.append_message(b"table", T_ONCHAIN_HEADER);
-                k.append_to_commit(&mut h);
-            }
-        }
-
-        StorageKey::from(h.finalize())
-    }
-
-    /// Computes the cryptographic commitment for this entry's value.
-    ///
-    /// Creates a deterministic hash of the entry's value data that can be used
-    /// for efficient equality comparisons in the trie.
-    fn as_value(&self) -> StorageValue {
-        let mut h = CommitHasher::new(b"pegout-entry-value");
-
-        match self {
-            PegoutEntry::Unassigned { v, .. } => v.append_to_commit(&mut h),
-            PegoutEntry::Proposal { v, .. } => v.append_to_commit(&mut h),
-            PegoutEntry::OnchainUtxo { v, .. } => v.append_to_commit(&mut h),
-            PegoutEntry::OnchainHeader { v, .. } => v.append_to_commit(&mut h),
-        }
-
-        StorageValue::from(h.finalize())
-    }
-
-    /// Returns both the key and value commitments for this entry.
-    fn as_key_value(&self) -> (StorageKey, StorageValue) {
-        (self.as_key(), self.as_value())
-    }
-
-    fn partition_name(&self) -> Self::PartitionName {
-        match self {
-            PegoutEntry::Unassigned { .. } => EntryNames::Unassigned,
-            PegoutEntry::Proposal { .. } => EntryNames::Proposal,
-            PegoutEntry::OnchainUtxo { .. } => EntryNames::OnchainUtxo,
-            PegoutEntry::OnchainHeader { .. } => EntryNames::OnchainHeader,
-        }
-    }
 }
 
 impl ToCommit for UnassignedEntry {
@@ -293,69 +346,74 @@ impl ToCommit for OnchainHeaderEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DataSourceError<D>(pub D);
-
-// TODO: Implement this for the other *Error wrappers as well.
-impl<D> From<D> for DataSourceError<D> {
-    fn from(value: D) -> Self {
-        DataSourceError(value)
-    }
-}
-
-// TODO: Those methods should never return an `Option<_>`, but an error instead.
-// If the value does not exist, then this should be an error; implying a bug.
 pub trait DataSource {
     type Error;
 
     fn insert_unassigned(
         &mut self,
-        pegout: &PegoutId,
-        entry: UnassignedEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EUnassigned>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_unassigned(
         &mut self,
         pegout: &PegoutId,
-    ) -> Result<Option<UnassignedEntry>, DataSourceError<Self::Error>>;
-    fn remove_unassigned(&mut self, pegout: &PegoutId) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EUnassigned>, DatabaseError<Self::Error>>;
+    fn remove_unassigned(
+        &mut self,
+        entry: Checked<EUnassigned>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     //
     fn insert_utxo(
         &mut self,
-        utxo: &OutPoint,
-        entry: OnchainUtxoEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_utxo(
         &mut self,
         utxo: &OutPoint,
-    ) -> Result<Option<OnchainUtxoEntry>, DataSourceError<Self::Error>>;
-    fn finalize_utxo(&mut self, utxo: &OutPoint) -> Result<(), DataSourceError<Self::Error>>;
-    fn orphan_utxo(&mut self, utxo: &OutPoint) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EOnchainUtxo>, DatabaseError<Self::Error>>;
+    fn finalize_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
+    fn orphan_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     //
     fn insert_header(
         &mut self,
-        block: &BlockHash,
-        entry: OnchainHeaderEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EOnchainHeader>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_header(
         &mut self,
         block: &BlockHash,
-    ) -> Result<Option<OnchainHeaderEntry>, DataSourceError<Self::Error>>;
-    fn remove_header(&mut self, block: &BlockHash) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EOnchainHeader>, DatabaseError<Self::Error>>;
+    fn remove_header(
+        &mut self,
+        entry: Checked<EOnchainHeader>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     //
     fn insert_pegout_proposal(
         &mut self,
-        txid: &Txid,
-        entry: ProposalEntry,
-    ) -> Result<(), DataSourceError<Self::Error>>;
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
     fn get_proposal(
         &mut self,
         txid: &Txid,
-    ) -> Result<Option<ProposalEntry>, DataSourceError<Self::Error>>;
-    fn finalize_proposal(&mut self, txid: &Txid) -> Result<(), DataSourceError<Self::Error>>;
-    fn orphan_proposal(&mut self, txid: &Txid) -> Result<(), DataSourceError<Self::Error>>;
+    ) -> Result<Option<EProposal>, DatabaseError<Self::Error>>;
+    fn finalize_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
+    fn orphan_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>>;
 }
 
-impl<'db> BotanixLayer<'db> {
+impl<'db, DB> BotanixLayer<'db, DB>
+where
+    DB: HashDB<CommitHasher, DBValue> + DataSource,
+{
     /// Moves a pegout to the initiated state, making it available for spending.
     ///
     /// Creates a new pegout entry in the initiated table while ensuring it
@@ -364,39 +422,29 @@ impl<'db> BotanixLayer<'db> {
     ///
     /// # State Changes
     /// - Sets the pegout to initiated state
-    pub fn insert_unassigned<DS: DataSource>(
+    pub fn insert_unassigned(
         &mut self,
         pegout: PegoutWithId,
         candidates: Sorted<MultisigId>,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
         let id = pegout.id;
-        let entry = UnassignedEntry { pegout, candidates };
+        let value = UnassignedEntry { pegout, candidates };
 
-        self.trie
-            .insert_non_existing(PegoutEntry::Unassigned { k: &id, v: &entry })
-            .map_err(|_| ValidationError::UnassignedPegoutAlreadyInserted)?;
-
-        data_source.insert_unassigned(&id, entry)?;
+        self.insert_checked(
+            EUnassigned { k: id, v: value },
+            //
+            |db, checked| db.insert_unassigned(checked),
+        )
+        .map_err(|_| ValidationError::UnassignedPegoutAlreadyInserted)?;
 
         Ok(())
     }
     // TODO: Use untrusted_* notation for fields?
-    pub fn insert_pegout_proposal<DS: DataSource>(
+    pub fn insert_pegout_proposal(
         &mut self,
         proposal: ProposalEntry,
-        //
-        // TODO: This should probably be a reference.
-        unval_proposal: Option<ProposalEntry>,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
-        self.trie
-            .insert_non_existing(PegoutEntry::Proposal {
-                k: &proposal.txid,
-                v: &proposal,
-            })
-            .map_err(|_| ValidationError::ProposalAlreadyInserted)?;
-
+        prev_proposal: Option<Txid>,
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
         if proposal.utxos.is_empty() {
             return Err(ValidationError::ProposalEmptyUtxos.into());
         }
@@ -420,20 +468,15 @@ impl<'db> BotanixLayer<'db> {
             }
         }
 
-        if let Some(unval) = unval_proposal {
+        if let Some(prev) = prev_proposal {
             // VALIDATE: The previous proposal must exist.
-            self.trie
-                .ensure_existing(PegoutEntry::Proposal {
-                    k: &unval.txid,
-                    v: &unval,
-                })
+            let prev: Checked<_> = self
+                .get_checked(|db| db.get_proposal(&prev))
                 .map_err(|_| ValidationError::UpgradedProposalBadPreviousRef)?;
-
-            let prev = unval; // OK!
 
             // VALIDATE: Only the original author is allowed to upgrade a
             // proposal.
-            if prev.fed_id != proposal.fed_id {
+            if prev.v.fed_id != proposal.fed_id {
                 return Err(ValidationError::UpgradedProposalBadFedId.into());
             }
 
@@ -445,7 +488,7 @@ impl<'db> BotanixLayer<'db> {
             // `Sorted<_>` structure. Hence, we just check whether the FIRST
             // Utxo from the pevious proposal is found ANYWHERE in the list of
             // the upgraded proposal.
-            let utxo_to_reuse = &prev.utxos[0];
+            let utxo_to_reuse = &prev.v.utxos[0];
             if !used_utxos.contains(&utxo_to_reuse) {
                 return Err(ValidationError::UpgradedProposalMustReuseUtxo.into());
             }
@@ -453,68 +496,62 @@ impl<'db> BotanixLayer<'db> {
             // VALIDATE: Any pegout in the new proposal that is NOT in the previous
             // proposal MUST be in an unassigned state, which is then claimed.
             for pegout in used_pegouts {
-                if prev.pegouts.contains(pegout) {
+                if prev.v.pegouts.contains(pegout) {
                     continue;
                 }
 
-                let unval = data_source
-                    .get_unassigned(&pegout.id)?
-                    .ok_or(ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
-
-                self.trie
-                    .remove_existing(PegoutEntry::Unassigned {
-                        k: &pegout.id,
-                        v: &unval,
-                    })
-                    .map_err(|_| ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
-
-                let unassigned: UnassignedEntry = unval; // OK!
+                let unassigned: Checked<_> =
+                    self.get_checked(|db| db.get_unassigned(&pegout.id))
+                        .map_err(|_| ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
 
                 // VALIDATE: The federation is qualified to claim that pegout.
-                if !unassigned.candidates.contains(&proposal.fed_id) {
+                if !unassigned.v.candidates.contains(&proposal.fed_id) {
                     return Err(ValidationError::BadCandidateClaim.into());
                 }
 
-                data_source.remove_unassigned(&pegout.id)?;
+                self.remove_checked(unassigned.consume(), |db, checked| {
+                    db.remove_unassigned(checked)
+                })
+                .map_err(|_| ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
             }
         } else {
             // VALIDATE: If no previous propsal exists, then EVERY pegout MUST
             // be in an unassigned state, which are then claimed.
             for pegout in used_pegouts {
-                let unval = data_source
-                    .get_unassigned(&pegout.id)?
-                    .ok_or(ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
-
-                self.trie
-                    .remove_existing(PegoutEntry::Unassigned {
-                        k: &pegout.id,
-                        v: &unval,
-                    })
-                    .map_err(|_| ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
-
-                let unassigned: UnassignedEntry = unval; // Ok!
+                let unassigned: Checked<_> =
+                    self.get_checked(|db| db.get_unassigned(&pegout.id))
+                        .map_err(|_| ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
 
                 // VALIDATE: The federation is qualified to claim that pegout.
-                if !unassigned.candidates.contains(&proposal.fed_id) {
+                if !unassigned.v.candidates.contains(&proposal.fed_id) {
                     return Err(ValidationError::BadCandidateClaim.into());
                 }
 
-                data_source.remove_unassigned(&pegout.id)?;
+                self.remove_checked(unassigned.consume(), |db, checked| {
+                    db.remove_unassigned(checked)
+                })
+                .map_err(|_| ValidationError::UnassignedPegoutInvalidOrAlreadyProposed)?;
             }
         }
 
-        let txid = proposal.txid;
-        data_source.insert_pegout_proposal(&txid, proposal)?;
+        self.insert_checked(
+            EProposal {
+                k: proposal.txid,
+                v: proposal,
+            },
+            //
+            |db, checked| db.insert_pegout_proposal(checked),
+        )
+        .map_err(|_| ValidationError::ProposalAlreadyInserted)?;
 
         Ok(())
     }
     // TODO: Should `bitcoin_height` be specifically validated?
-    pub fn insert_bitcoin_header<DS: DataSource>(
+    pub fn insert_bitcoin_header(
         &mut self,
         block_hash: BlockHash,
         bitcoin_height: u64,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
         let entry = OnchainHeaderEntry {
             block_hash,
             bitcoin_height,
@@ -522,332 +559,295 @@ impl<'db> BotanixLayer<'db> {
         };
 
         // VALIDATE: The passed-on header has not been tracked yet.
-        self.trie.insert_non_existing(PegoutEntry::OnchainHeader {
-            k: &block_hash,
-            v: &entry,
-        })?;
-
-        data_source.insert_header(&block_hash, entry)?;
+        self.insert_checked(
+            EOnchainHeader {
+                k: block_hash,
+                v: entry,
+            },
+            //
+            |db, checked| db.insert_header(checked),
+        )?;
 
         Ok(())
     }
-    pub fn register_bitcoin_tx<DS: DataSource>(
+    pub fn register_bitcoin_tx(
         &mut self,
         block_hash: BlockHash,
-        proposal: ProposalEntry,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
-        self.trie
-            .ensure_existing(PegoutEntry::Proposal {
-                k: &proposal.txid,
-                v: &proposal,
-            })
+        txid: Txid,
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
+        let proposal: Checked<_> = self
+            .get_checked(|db| db.get_proposal(&txid))
             .map_err(|_| ValidationError::ProposalDoesNotExist)?;
 
-        // TODO: The method should not return an `Option<_>`, but an error instead.
-        let unval = data_source
-            .get_header(&block_hash)?
-            .expect("header must exist");
+        let header: Checked<_> = self.get_checked(|db| db.get_header(&block_hash))?;
 
-        if unval.proposals.contains(&proposal.txid) {
+        if header.v.proposals.contains(&txid) {
             return Err(ValidationError::TxidAlreadyInserted.into());
         }
 
         let updated_proposals: Sorted<Txid> = {
-            let mut p = unval.proposals.to_vec();
-            p.push(proposal.txid);
+            let mut p = header.v.proposals.to_vec();
+            p.push(txid);
             p.into()
         };
 
         let entry = OnchainHeaderEntry {
             block_hash,
-            bitcoin_height: unval.bitcoin_height,
+            bitcoin_height: header.v.bitcoin_height,
             proposals: updated_proposals,
         };
 
-        self.trie
-            .update_existing(
-                // New entry.
-                PegoutEntry::OnchainHeader {
-                    k: &block_hash,
-                    v: &entry,
-                },
-                // VALIDATE: The passed-on entry is valid.
-                PegoutEntry::OnchainHeader {
-                    k: &block_hash,
-                    v: &unval,
-                },
-            )
-            .map_err(|_| ValidationError::HeaderBadPreviousRef)?;
+        self.update_checked(
+            // New entry
+            EOnchainHeader {
+                k: block_hash,
+                v: entry,
+            },
+            // Previous (checked) entry
+            header,
+            //
+            |db, checked| db.insert_header(checked),
+        )
+        .map_err(|_| ValidationError::HeaderBadPreviousRef)?;
 
-        let _prev_entry: OnchainHeaderEntry = unval; // OK!
+        debug_assert!(!proposal.v.utxos.is_empty());
 
-        data_source.insert_header(&block_hash, entry)?;
-
-        for utxo in &proposal.utxos {
-            let Some(unval) = data_source.get_utxo(utxo)? else {
-                let entry = OnchainUtxoEntry {
-                    utxo: *utxo,
-                    txids: vec![proposal.txid].into(),
+        for utxo in proposal.v.utxos.iter().copied() {
+            let Some(prev) = self.get_checked_optional(|db| db.get_utxo(&utxo))? else {
+                let value = OnchainUtxoEntry {
+                    utxo,
+                    txids: vec![txid].into(),
                 };
 
-                self.trie
-                    .insert_non_existing(PegoutEntry::OnchainUtxo { k: utxo, v: &entry })
-                    .map_err(|_| ValidationError::UtxoAlreadyInserted)?;
+                self.insert_checked(
+                    EOnchainUtxo { k: utxo, v: value },
+                    //
+                    |db, checked| db.insert_utxo(checked),
+                )?;
 
-                data_source.insert_utxo(utxo, entry)?;
                 continue;
             };
 
+            let prev: Checked<_> = prev;
+
+            if prev.v.txids.contains(&txid) {
+                return Err(ValidationError::TxidAlreadyInserted.into());
+            }
+
             let updated_entry = OnchainUtxoEntry {
-                utxo: unval.utxo,
+                utxo: prev.v.utxo,
                 txids: {
-                    let mut e = unval.txids.to_vec();
-                    e.push(proposal.txid);
+                    let mut e = prev.v.txids.to_vec();
+                    e.push(txid);
                     e.into()
                 },
             };
 
-            self.trie
-                .update_existing(
-                    // New entry.
-                    PegoutEntry::OnchainUtxo {
-                        k: utxo,
-                        v: &updated_entry,
-                    },
-                    // VALIDATE: The passed-on entry is valid.
-                    PegoutEntry::OnchainUtxo { k: utxo, v: &unval },
-                )
-                .map_err(|_| ValidationError::UtxoBadPreviousRef)?;
-
-            let prev: OnchainUtxoEntry = unval; // OK!
-
-            if prev.txids.contains(&proposal.txid) {
-                return Err(ValidationError::TxidAlreadyInserted.into());
-            }
-
-            data_source.insert_utxo(utxo, updated_entry)?;
+            self.update_checked(
+                // New entry
+                EOnchainUtxo {
+                    k: utxo,
+                    v: updated_entry,
+                },
+                // Previous (checked) entry
+                prev,
+                //
+                |db, checked| db.insert_utxo(checked),
+            )
+            .map_err(|_| ValidationError::UtxoBadPreviousRef)?;
         }
 
         Ok(())
     }
-    pub fn finalize_bitcoin_header<DS: DataSource>(
+    pub fn finalize_bitcoin_header(
         &mut self,
         block_hash: BlockHash,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
-        let unval = data_source.get_header(&block_hash)?.unwrap();
-        self.trie
-            .remove_existing(PegoutEntry::OnchainHeader {
-                k: &block_hash,
-                v: &unval,
-            })
-            .map_err(|_| ValidationError::HeaderDoesNotExist)?;
-
-        let header: OnchainHeaderEntry = unval; // OK!
-
-        data_source.remove_header(&block_hash)?;
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
+        let header: Checked<_> = self.get_checked(|db| db.get_header(&block_hash))?;
 
         let mut finalized_txids: HashSet<Txid> = HashSet::new();
         let mut finalized_utxos: HashSet<OutPoint> = HashSet::new();
         let mut finalized_pegouts: HashSet<PegoutId> = HashSet::new();
 
         // For each finalized Txid, lookup the proposal.
-        for finalized_txid in &header.proposals {
-            let unval = data_source.get_proposal(finalized_txid)?.unwrap();
-            self.trie.remove_existing(PegoutEntry::Proposal {
-                //
-                k: finalized_txid,
-                v: &unval,
-            })?;
+        for finalized_txid in &header.v.proposals {
+            let proposal: Checked<_> = self.get_checked(|db| db.get_proposal(finalized_txid))?;
 
-            let proposal: ProposalEntry = unval; // OK!
-
-            if !finalized_txids.insert(proposal.txid) {
+            if !finalized_txids.insert(proposal.v.txid) {
                 // FATAL: Bitcoin should prevent this.
                 panic!()
             }
 
-            for utxo in proposal.utxos {
-                if !finalized_utxos.insert(utxo) {
+            for utxo in &proposal.v.utxos {
+                if !finalized_utxos.insert(*utxo) {
                     // FATAL: Bitcoin should prevent this.
                     panic!()
                 }
             }
 
-            for pegout in &proposal.pegouts {
+            for pegout in &proposal.v.pegouts {
                 if !finalized_pegouts.insert(pegout.id) {
                     // FATAL: Bitcoin should prevent this.
                     panic!()
                 }
             }
 
-            data_source.finalize_proposal(&proposal.txid)?;
+            self.remove_checked(
+                proposal.consume(),
+                //
+                |db, checked| db.finalize_proposal(checked),
+            )?;
         }
 
         let mut competing_txids: HashSet<Txid> = HashSet::new();
 
         for finalized_utxo in &finalized_utxos {
-            let unval = data_source.get_utxo(finalized_utxo)?.unwrap();
-            self.trie.remove_existing(PegoutEntry::OnchainUtxo {
-                //
-                k: finalized_utxo,
-                v: &unval,
-            })?;
+            let utxo: Checked<_> = self.get_checked(|db| db.get_utxo(finalized_utxo))?;
 
-            let entry: OnchainUtxoEntry = unval; // OK!
-
-            for txid in &entry.txids {
+            for txid in &utxo.v.txids {
                 if !finalized_txids.contains(txid) {
                     competing_txids.insert(*txid);
                 }
             }
 
-            // TODO: Should call something like `entry.utxo` (TBD)
-            data_source.finalize_utxo(finalized_utxo)?;
+            self.remove_checked(
+                utxo.consume(),
+                //
+                |db, checked| db.finalize_utxo(checked),
+            )?;
         }
 
         for competing_txid in &competing_txids {
-            let unval = data_source.get_proposal(competing_txid)?.unwrap();
-            self.trie.remove_existing(PegoutEntry::Proposal {
-                //
-                k: competing_txid,
-                v: &unval,
-            })?;
+            let competing: Checked<_> = self.get_checked(|db| db.get_proposal(competing_txid))?;
 
-            let competing_proposal: ProposalEntry = unval; // OK!
-
-            for utxo in &competing_proposal.utxos {
-                self._cleanup_utxo(&competing_txids, utxo, data_source)?
+            for utxo in &competing.v.utxos {
+                self._cleanup_utxo(&competing_txids, utxo)?
             }
 
-            for pegout in competing_proposal.pegouts {
+            for pegout in competing.v.pegouts.iter().cloned() {
                 let pegout_id = pegout.id;
 
                 if !finalized_pegouts.contains(&pegout_id) {
-                    let entry = UnassignedEntry {
+                    let value = UnassignedEntry {
                         pegout,
                         candidates: Sorted::empty(), // TODO
                     };
 
-                    self.trie.insert_non_existing(PegoutEntry::Unassigned {
-                        k: &pegout_id,
-                        v: &entry,
-                    })?;
-
-                    data_source.insert_unassigned(&pegout_id, entry)?;
+                    self.insert_checked(
+                        EUnassigned {
+                            k: pegout_id,
+                            v: value,
+                        },
+                        //
+                        |db, checked| db.insert_unassigned(checked),
+                    )?;
                 } else {
                     // Pegout DROPPED - officially finalized!
                 }
             }
 
-            data_source.orphan_proposal(&competing_proposal.txid)?;
+            self.remove_checked(
+                competing.consume(),
+                //
+                |db, checked| db.orphan_proposal(checked),
+            )?;
         }
+
+        self.remove_checked(
+            header.consume(),
+            //
+            |db, checked| db.remove_header(checked),
+        )
+        .map_err(|_| ValidationError::HeaderDoesNotExist)?;
 
         Ok(())
     }
-    pub fn orphan_bitcoin_header<DS: DataSource>(
+    pub fn orphan_bitcoin_header(
         &mut self,
         block_hash: BlockHash,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
-        let unval = data_source.get_header(&block_hash)?.unwrap();
-        self.trie.remove_existing(PegoutEntry::OnchainHeader {
-            k: &block_hash,
-            v: &unval,
-        })?;
-
-        let header: OnchainHeaderEntry = unval; // OK!
-
-        data_source.remove_header(&block_hash)?;
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
+        let header = self.get_checked(|db| db.get_header(&block_hash))?;
 
         let mut orphaned_txids: HashSet<Txid> = HashSet::new();
         let mut orphaned_utxos: HashSet<OutPoint> = HashSet::new();
 
         // For each orphaned Txid, lookup the proposal.
-        for txid in &header.proposals {
+        for txid in &header.v.proposals {
             // NOTE: It's possible that an (orphaned) proposal was already
             // removed in `Self::finalize_bitcoin_header` when competing Txids
             // (such as this one) were found. Competing proposals are no longer
             // picked up by the Bitcoin mempool since Utxo reuse is prohibited.
-            let Some(unval) = data_source.get_proposal(txid)? else {
-                // TODO: Should still do a state check by key!
+            let Some(proposal) = self.get_checked_optional(|db| db.get_proposal(txid))? else {
                 continue;
             };
 
-            self.trie.ensure_existing(PegoutEntry::Proposal {
-                //
-                k: txid,
-                v: &unval,
-            })?;
+            // IMPORTANT: The orphaned proposal MUST REMAIN in the state, since the
+            // Bitcoin mempool might pick it up again!
 
-            let proposal: ProposalEntry = unval; // OK!
-
-            if !orphaned_txids.insert(proposal.txid) {
+            if !orphaned_txids.insert(proposal.v.txid) {
                 // FATAL: Bitcoin should prevent this.
                 panic!()
             }
 
-            for utxo in proposal.utxos {
-                if !orphaned_utxos.insert(utxo) {
+            for utxo in &proposal.v.utxos {
+                if !orphaned_utxos.insert(*utxo) {
                     // FATAL: Bitcoin should prevent this.
                     panic!()
                 }
             }
-
-            // NOTE: The orphaned proposal MUST REMAIN in the state, since the
-            // Bitcoin mempool might pick those up again!
         }
 
         for orphaned_utxo in &orphaned_utxos {
-            self._cleanup_utxo(&orphaned_txids, orphaned_utxo, data_source)?
+            self._cleanup_utxo(&orphaned_txids, orphaned_utxo)?
         }
+
+        self.remove_checked(
+            header.consume(),
+            //
+            |db, checked| db.remove_header(checked),
+        )?;
 
         Ok(())
     }
-    pub fn _cleanup_utxo<DS: DataSource>(
+    pub fn _cleanup_utxo(
         &mut self,
         exclude: &HashSet<Txid>,
         utxo: &OutPoint,
-        data_source: &mut DS,
-    ) -> Result<(), PegoutError<DS::Error>> {
-        let Some(unval) = data_source.get_utxo(utxo)? else {
+    ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
+        let Some(prev) = self.get_checked_optional(|db| db.get_utxo(utxo))? else {
             // The Utxo was already removed, nothing left to do.
             return Ok(());
         };
 
         // Remove self from Txid set.
         let updated_entry = OnchainUtxoEntry {
-            utxo: unval.utxo,
+            utxo: prev.v.utxo,
             txids: {
-                let mut e = unval.txids.to_vec();
+                let mut e = prev.v.txids.to_vec();
                 e.retain(|txid| !exclude.contains(txid));
                 e.into()
             },
         };
 
         if updated_entry.txids.is_empty() {
-            self.trie.remove_existing(PegoutEntry::OnchainUtxo {
+            self.remove_checked(
+                prev.consume(),
                 //
-                k: utxo,
-                v: &unval,
-            })?;
-
-            // TODO: Comment on this.
-            data_source.orphan_utxo(utxo)?;
+                |db, checked| db.orphan_utxo(checked),
+            )?;
         } else {
-            self.trie.update_existing(
+            self.update_checked(
                 // New entry
-                PegoutEntry::OnchainUtxo {
-                    k: utxo,
-                    v: &updated_entry,
+                EOnchainUtxo {
+                    k: *utxo,
+                    v: updated_entry,
                 },
-                // Previous entry
-                PegoutEntry::OnchainUtxo { k: utxo, v: &unval },
+                // Previous (checked) entry
+                prev,
+                //
+                |db, checked| db.insert_utxo(checked),
             )?;
         }
-
-        let _txids = unval; // OK!
 
         Ok(())
     }
