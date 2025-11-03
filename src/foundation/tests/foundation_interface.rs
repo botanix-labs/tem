@@ -1,10 +1,9 @@
 #![allow(non_snake_case)]
 
-use crate::foundation::commitment::mem_db::InMemoryCommitments;
 use crate::foundation::commitment::sorted::Sorted;
 use crate::foundation::component::pegout::ProposalEntry;
 use crate::foundation::proof::AuxEvent;
-use crate::foundation::tests::InMemoryDataLayer;
+use crate::foundation::tests::InMemoryAtomicLayer;
 use crate::foundation::{Error, Foundation, MULTISIG, ValidationError};
 use crate::test_utils::{
     gen_bitcoin_hash, gen_bitcoin_tx_from_pegouts, gen_foundation_state_root, gen_pegout_with_id,
@@ -12,15 +11,14 @@ use crate::test_utils::{
 
 #[test]
 fn foundation_basic_atomic_properties() {
-    let data = InMemoryDataLayer::new();
-    let commitment = InMemoryCommitments::new();
+    let atomic_layer = InMemoryAtomicLayer::new();
 
     let A = gen_bitcoin_hash();
     let B = gen_bitcoin_hash();
     let C = gen_bitcoin_hash();
 
     // FOUNDATION: Setup.
-    let mut f = Foundation::new(data, commitment, A, 200, 0).unwrap();
+    let mut f = Foundation::new(atomic_layer, A, 200, 0).unwrap();
     let origin_root = f.commitment_root().unwrap();
 
     // PROPOSE: Construct an invalid state transition.
@@ -63,14 +61,13 @@ fn foundation_basic_atomic_properties() {
 
 #[test]
 fn foundation_propose_and_finalize() {
-    let data = InMemoryDataLayer::new();
-    let commitment = InMemoryCommitments::new();
+    let atomic_layer = InMemoryAtomicLayer::new();
 
     let A = gen_bitcoin_hash();
     let B = gen_bitcoin_hash();
 
     // FOUNDATION: Setup.
-    let mut f = Foundation::new(data, commitment, A, 200, 0).unwrap();
+    let mut f = Foundation::new(atomic_layer, A, 200, 0).unwrap();
     let origin_root = f.commitment_root().unwrap();
 
     // PROPOSE: Construct a valid state transition.
@@ -110,15 +107,14 @@ fn foundation_propose_and_finalize() {
 
 #[test]
 fn foundation_propose_and_finalize_bad_proof() {
-    let data = InMemoryDataLayer::new();
-    let commitment = InMemoryCommitments::new();
+    let atomic_layer = InMemoryAtomicLayer::new();
 
     let A = gen_bitcoin_hash();
     let B = gen_bitcoin_hash();
     let C = gen_bitcoin_hash();
 
     // FOUNDATION: Setup.
-    let mut f = Foundation::new(data, commitment, A, 200, 0).unwrap();
+    let mut f = Foundation::new(atomic_layer, A, 200, 0).unwrap();
     let origin_root = f.commitment_root().unwrap();
 
     // PROPOSE: Construct a valid state transition.
@@ -163,8 +159,7 @@ fn foundation_propose_and_finalize_bad_proof() {
 
 #[test]
 fn foundation_initiate_pegouts_with_aux_events() {
-    let data = InMemoryDataLayer::new();
-    let commitment = InMemoryCommitments::new();
+    let atomic_layer = InMemoryAtomicLayer::new();
 
     let A = gen_bitcoin_hash();
     let (B, B_PREV) = (gen_bitcoin_hash(), A);
@@ -198,7 +193,7 @@ fn foundation_initiate_pegouts_with_aux_events() {
     };
 
     // FOUNDATION: Setup.
-    let mut f = Foundation::new(data, commitment, A, 200, 0).unwrap();
+    let mut f = Foundation::new(atomic_layer, A, 200, 0).unwrap();
 
     // PROPOSE: Construct a valid state transition.
     let proof = f
@@ -213,7 +208,7 @@ fn foundation_initiate_pegouts_with_aux_events() {
             c.insert_bitcoin_header_unchecked(C, C_PREV, 202)?;
 
             // Submit the proposal first.
-            c.insert_pegout_proposal(proposal.clone())?;
+            c.insert_pegout_proposal(proposal.clone(), None)?;
 
             // Register transaction for block B, using pegouts(1&2).
             c.insert_bitcoin_tx_unchecked(B, transaction.clone(), proposal.clone())?;
@@ -270,7 +265,7 @@ fn foundation_initiate_pegouts_with_aux_events() {
             c.insert_bitcoin_header_unchecked(C, C_PREV, 202)?;
 
             // Submit the proposal first.
-            c.insert_pegout_proposal(proposal.clone())?;
+            c.insert_pegout_proposal(proposal.clone(), None)?;
 
             // Register transaction for block B, using pegouts(1&2).
             c.insert_bitcoin_tx_unchecked(B, transaction.clone(), proposal)?;
