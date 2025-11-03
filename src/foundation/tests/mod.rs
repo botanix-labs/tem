@@ -1,12 +1,12 @@
 use crate::{
     foundation::{
-        self, AtomicError,
-        commitment::{MultisigId, sorted::Sorted},
+        AtomicError, AtomicErrorVariant, AtomicLayer, CommitHasher, CommitmentStateRoot,
+        commitment::{AliasMemoryDB, DBKey, MultisigId, sorted::Sorted},
         component::{
-            AtomicDataLayer, BotanixLayer, DataLayerError,
+            BotanixLayer, Checked, DatabaseError,
             pegout::{
-                DataSource, DataSourceError, OnchainHeaderEntry, OnchainUtxoEntry, PegoutError,
-                ProposalEntry, UnassignedEntry,
+                DataSource, EOnchainHeader, EOnchainUtxo, EProposal, EUnassigned,
+                OnchainHeaderEntry, OnchainUtxoEntry, ProposalEntry, UnassignedEntry,
             },
         },
     },
@@ -14,11 +14,10 @@ use crate::{
     validation::pegout::{PegoutId, PegoutWithId},
 };
 use bitcoin::{BlockHash, OutPoint, Txid};
+use hash_db::{AsHashDB, HashDB};
 use rand::Rng;
-use std::{
-    collections::{HashMap, VecDeque},
-    ops::{Deref, DerefMut},
-};
+use std::collections::{HashMap, VecDeque};
+use trie_db::DBValue;
 
 mod foundation_interface;
 mod header_finalize;
@@ -28,6 +27,316 @@ mod register_transaction;
 const ALICE: MultisigId = 0;
 const BOB: MultisigId = 1;
 const EVE: MultisigId = 2;
+
+pub struct InMemoryAtomicLayer {
+    db: InMemoryDb,
+    root: [u8; 32],
+    prev_db: Option<InMemoryDb>,
+    prev_root: Option<[u8; 32]>,
+}
+
+impl InMemoryAtomicLayer {
+    pub fn new() -> Self {
+        let (db, root) = InMemoryDb::new();
+
+        let mut atomic = InMemoryAtomicLayer {
+            db,
+            root,
+            prev_db: None,
+            prev_root: None,
+        };
+
+        // Setup pegout state.
+        let candidates = atomic.db.data.candidates.clone();
+        let unassigned = atomic.db.data.unassigned.clone();
+
+        {
+            let mut b = atomic.start_tx().unwrap();
+            for pegout in unassigned {
+                b.insert_unassigned(pegout, candidates.clone()).unwrap();
+            }
+        }
+
+        // Commit changes.
+        atomic.commit().unwrap();
+        atomic
+    }
+    /// Convenience method for automatically starting a database transactiona
+    /// and commiting the result on success or rollback on error.
+    pub fn apply<F, T, E>(&mut self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(BotanixLayer<'_, InMemoryDb>) -> Result<T, E>,
+    {
+        let tx = self.start_tx().unwrap();
+        // Run the provided logic.
+        let res = f(tx);
+
+        if res.is_ok() {
+            self.commit().unwrap();
+        } else {
+            self.rollback().unwrap();
+        }
+
+        res
+    }
+    pub fn candidates(&self) -> &Sorted<MultisigId> {
+        self.db.data.candidates()
+    }
+    pub fn gen_new_proposal(&mut self, fed_id: MultisigId, botanix_height: u64) -> ProposalEntry {
+        self.db.data.gen_new_proposal(fed_id, botanix_height)
+    }
+    pub fn gen_upgrade_proposal_reused_pegout(&mut self, other: &ProposalEntry) -> ProposalEntry {
+        self.db.data.gen_upgrade_proposal_reused_pegout(other)
+    }
+}
+
+impl AtomicLayer<InMemoryDb> for InMemoryAtomicLayer {
+    // In-memory database never fails.
+    type BackendError = ();
+
+    fn start_tx<'db>(
+        &'db mut self,
+    ) -> Result<BotanixLayer<'db, InMemoryDb>, AtomicError<Self::BackendError>> {
+        if self.prev_db.is_some() {
+            return Err(AtomicErrorVariant::CommitmentLayerAlreadyStarted.into());
+        }
+
+        // NOTE: For the purely in-memory database, we just do a full copy. This
+        // is not ideal, of course, but since it's going to be used primarily
+        // for testing purposes anyway, we consider that acceptable.
+        self.prev_db = Some(self.db.clone());
+        self.prev_root = Some(self.root);
+
+        Ok(BotanixLayer::new(&mut self.db, &mut self.root))
+    }
+    fn commit(&mut self) -> Result<CommitmentStateRoot, AtomicError<Self::BackendError>> {
+        // Just drop the previous state.
+        let _ = self
+            .prev_db
+            .take()
+            .ok_or(AtomicErrorVariant::CommitmentLayerNotStarted)?;
+
+        let _ = self
+            //
+            .prev_root
+            .take()
+            .ok_or(AtomicErrorVariant::CommitmentLayerNotStarted)?;
+
+        debug_assert!(self.prev_db.is_none());
+        debug_assert!(self.prev_root.is_none());
+
+        let root = BotanixLayer::new(&mut self.db, &mut self.root).root();
+        Ok(root)
+    }
+    fn rollback(&mut self) -> Result<CommitmentStateRoot, AtomicError<Self::BackendError>> {
+        let prev_db = self
+            .prev_db
+            .take()
+            .ok_or(AtomicErrorVariant::CommitmentLayerNotStarted)?;
+
+        let prev_root = self
+            .prev_root
+            .take()
+            .ok_or(AtomicErrorVariant::CommitmentLayerNotStarted)?;
+
+        debug_assert!(self.prev_db.is_none());
+        debug_assert!(self.prev_root.is_none());
+
+        // Reset to previous state.
+        self.db = prev_db;
+        self.root = prev_root;
+
+        let root = BotanixLayer::new(&mut self.db, &mut self.root).root();
+        Ok(root)
+    }
+}
+
+#[derive(Clone)]
+pub struct InMemoryDb {
+    data: InMemoryDataSource,
+    commits: AliasMemoryDB,
+}
+
+impl InMemoryDb {
+    pub fn new() -> (Self, [u8; 32]) {
+        let data = InMemoryDataSource::new();
+        let (commits, root) = AliasMemoryDB::default_with_root();
+
+        (InMemoryDb { data, commits }, root)
+    }
+}
+
+impl HashDB<CommitHasher, DBValue> for InMemoryDb {
+    fn contains(&self, key: &DBKey, prefix: hash_db::Prefix) -> bool {
+        self.commits.contains(key, prefix)
+    }
+    fn emplace(&mut self, key: DBKey, prefix: hash_db::Prefix, value: DBValue) {
+        self.commits.emplace(key, prefix, value);
+    }
+    fn get(&self, key: &DBKey, prefix: hash_db::Prefix) -> Option<DBValue> {
+        self.commits.get(key, prefix)
+    }
+    fn insert(&mut self, prefix: hash_db::Prefix, value: &[u8]) -> DBKey {
+        self.commits.insert(prefix, value)
+    }
+    fn remove(&mut self, key: &DBKey, prefix: hash_db::Prefix) {
+        self.commits.remove(key, prefix);
+    }
+}
+
+impl AsHashDB<CommitHasher, DBValue> for InMemoryDb {
+    fn as_hash_db(&self) -> &dyn HashDB<CommitHasher, DBValue> {
+        self
+    }
+    fn as_hash_db_mut<'a>(&'a mut self) -> &'a mut (dyn HashDB<CommitHasher, DBValue> + 'a) {
+        self
+    }
+}
+
+impl DataSource for InMemoryDb {
+    // In-memory database never fails.
+    type Error = ();
+
+    fn insert_unassigned(
+        &mut self,
+        entry: Checked<EUnassigned>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        self.data.data_unassigned.insert(entry.k, entry.consume().v);
+        Ok(())
+    }
+
+    fn get_unassigned(
+        &mut self,
+        pegout: &PegoutId,
+    ) -> Result<Option<EUnassigned>, DatabaseError<Self::Error>> {
+        Ok(self.data.data_unassigned.get(pegout).map(|v| EUnassigned {
+            k: *pegout,
+            v: v.clone(),
+        }))
+    }
+
+    fn remove_unassigned(
+        &mut self,
+        entry: Checked<EUnassigned>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        self.data.data_unassigned.remove(&entry.k);
+        Ok(())
+    }
+    //
+    fn insert_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        self.data.data_utxo.insert(entry.k, entry.consume().v);
+        Ok(())
+    }
+
+    fn get_utxo(
+        &mut self,
+        utxo: &OutPoint,
+    ) -> Result<Option<EOnchainUtxo>, DatabaseError<Self::Error>> {
+        Ok(self.data.data_utxo.get(utxo).map(|v| EOnchainUtxo {
+            k: *utxo,
+            v: v.clone(),
+        }))
+    }
+
+    fn finalize_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        let removed_entry = self.data.data_utxo.remove(&entry.k).unwrap();
+        let prev = self
+            .data
+            .trash_finalized_utxos
+            .insert(entry.k, removed_entry);
+        assert!(prev.is_none());
+        Ok(())
+    }
+
+    fn orphan_utxo(
+        &mut self,
+        entry: Checked<EOnchainUtxo>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        let removed_entry = self.data.data_utxo.remove(&entry.k).unwrap();
+        let prev = self
+            .data
+            .trash_orphaned_utxos
+            .insert(entry.k, removed_entry);
+        assert!(prev.is_none());
+        Ok(())
+    }
+    //
+    fn insert_header(
+        &mut self,
+        entry: Checked<EOnchainHeader>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        self.data.data_header.insert(entry.k, entry.consume().v);
+        Ok(())
+    }
+
+    fn get_header(
+        &mut self,
+        block: &BlockHash,
+    ) -> Result<Option<EOnchainHeader>, DatabaseError<Self::Error>> {
+        Ok(self.data.data_header.get(block).map(|v| EOnchainHeader {
+            k: *block,
+            v: v.clone(),
+        }))
+    }
+
+    fn remove_header(
+        &mut self,
+        entry: Checked<EOnchainHeader>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        self.data.data_header.remove(&entry.k);
+        Ok(())
+    }
+    //
+    fn insert_pegout_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        self.data.data_proposals.insert(entry.k, entry.consume().v);
+        Ok(())
+    }
+
+    fn get_proposal(
+        &mut self,
+        txid: &Txid,
+    ) -> Result<Option<EProposal>, DatabaseError<Self::Error>> {
+        Ok(self.data.data_proposals.get(txid).map(|v| EProposal {
+            k: *txid,
+            v: v.clone(),
+        }))
+    }
+
+    fn finalize_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        let removed_entry = self.data.data_proposals.remove(&entry.k).unwrap();
+        let prev = self
+            .data
+            .trash_finalized_proposals
+            .insert(entry.k, removed_entry);
+        assert!(prev.is_none());
+        Ok(())
+    }
+
+    fn orphan_proposal(
+        &mut self,
+        entry: Checked<EProposal>,
+    ) -> Result<(), DatabaseError<Self::Error>> {
+        let removed_entry = self.data.data_proposals.remove(&entry.k).unwrap();
+        let prev = self
+            .data
+            .trash_orphaned_proposals
+            .insert(entry.k, removed_entry);
+        assert!(prev.is_none());
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryDataSource {
@@ -39,7 +348,6 @@ pub struct InMemoryDataSource {
     data_utxo: HashMap<OutPoint, OnchainUtxoEntry>,
     data_header: HashMap<BlockHash, OnchainHeaderEntry>,
     //
-    // TODO: trash for headers
     trash_finalized_proposals: HashMap<Txid, ProposalEntry>,
     trash_orphaned_proposals: HashMap<Txid, ProposalEntry>,
     trash_finalized_utxos: HashMap<OutPoint, OnchainUtxoEntry>,
@@ -52,16 +360,6 @@ impl InMemoryDataSource {
             candidates: vec![ALICE, BOB].into(),
             unassigned: (0..50).into_iter().map(|_| gen_pegout_with_id()).collect(),
             ..Default::default()
-        }
-    }
-    pub fn setup_pegout_state(&mut self, layer: &mut BotanixLayer<'_>) {
-        let candidates = self.candidates.clone();
-        let unassigned = self.unassigned.clone();
-
-        for pegout in unassigned {
-            layer
-                .insert_unassigned(pegout, candidates.clone(), self)
-                .unwrap();
         }
     }
     pub fn candidates(&self) -> &Sorted<MultisigId> {
@@ -118,185 +416,5 @@ impl InMemoryDataSource {
         };
 
         prop
-    }
-}
-
-pub struct InMemoryDataLayer {
-    db: InMemoryDataSource,
-    prev_db: Option<InMemoryDataSource>,
-}
-
-impl InMemoryDataLayer {
-    pub fn new() -> Self {
-        InMemoryDataLayer {
-            db: InMemoryDataSource::new(),
-            prev_db: None,
-        }
-    }
-}
-
-impl Deref for InMemoryDataLayer {
-    type Target = InMemoryDataSource;
-
-    fn deref(&self) -> &Self::Target {
-        &self.db
-    }
-}
-
-impl DerefMut for InMemoryDataLayer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.db
-    }
-}
-
-impl AtomicDataLayer for InMemoryDataLayer {
-    type BackendError = ();
-    type Transaction = InMemoryDataSource;
-
-    fn commit(&mut self) -> Result<(), DataLayerError<Self::BackendError>> {
-        let prev_db = self
-            .prev_db
-            .take()
-            .ok_or(AtomicError::CommitmentLayerNotStarted)?;
-
-        debug_assert!(self.prev_db.is_none());
-
-        // Just drop the previous state.
-        std::mem::drop(prev_db);
-
-        Ok(())
-    }
-    fn rollback(&mut self) -> Result<(), DataLayerError<Self::BackendError>> {
-        let prev_db = self
-            .prev_db
-            .take()
-            .ok_or(AtomicError::CommitmentLayerNotStarted)?;
-
-        // Reset to previous state.
-        self.db = prev_db;
-
-        debug_assert!(self.prev_db.is_none());
-
-        Ok(())
-    }
-    fn start_data_tx<'tx>(
-        &'tx mut self,
-    ) -> Result<&'tx mut Self::Transaction, DataLayerError<Self::BackendError>> {
-        if self.prev_db.is_some() {
-            return Err(AtomicError::CommitmentLayerAlreadyStarted.into());
-        }
-
-        // NOTE: For the purely in-memory database, we just do a full copy. This
-        // is not ideal, of course, but since it's going to be used primarily
-        // for testing purposes anyway, we consider that acceptable.
-        self.prev_db = Some(self.db.clone());
-
-        Ok(&mut self.db)
-    }
-}
-
-impl DataSource for InMemoryDataSource {
-    type Error = ();
-
-    fn insert_unassigned(
-        &mut self,
-        pegout: &PegoutId,
-        entry: UnassignedEntry,
-    ) -> Result<(), DataSourceError<Self::Error>> {
-        self.data_unassigned.insert(*pegout, entry);
-        Ok(())
-    }
-
-    fn get_unassigned(
-        &mut self,
-        pegout: &PegoutId,
-    ) -> Result<Option<UnassignedEntry>, DataSourceError<Self::Error>> {
-        Ok(self.data_unassigned.get(pegout).cloned())
-    }
-
-    fn remove_unassigned(&mut self, pegout: &PegoutId) -> Result<(), DataSourceError<Self::Error>> {
-        self.data_unassigned.remove(pegout);
-        Ok(())
-    }
-
-    fn insert_utxo(
-        &mut self,
-        utxo: &OutPoint,
-        entry: OnchainUtxoEntry,
-    ) -> Result<(), DataSourceError<Self::Error>> {
-        self.data_utxo.insert(*utxo, entry);
-        Ok(())
-    }
-
-    fn get_utxo(
-        &mut self,
-        utxo: &OutPoint,
-    ) -> Result<Option<OnchainUtxoEntry>, DataSourceError<Self::Error>> {
-        Ok(self.data_utxo.get(utxo).cloned())
-    }
-
-    fn finalize_utxo(&mut self, utxo: &OutPoint) -> Result<(), DataSourceError<Self::Error>> {
-        let entry = self.data_utxo.remove(utxo).unwrap();
-        let prev = self.trash_finalized_utxos.insert(*utxo, entry);
-        assert!(prev.is_none());
-        Ok(())
-    }
-
-    fn orphan_utxo(&mut self, utxo: &OutPoint) -> Result<(), DataSourceError<Self::Error>> {
-        let entry = self.data_utxo.remove(utxo).unwrap();
-        let prev = self.trash_orphaned_utxos.insert(*utxo, entry);
-        assert!(prev.is_none());
-        Ok(())
-    }
-
-    fn insert_header(
-        &mut self,
-        block: &BlockHash,
-        entry: OnchainHeaderEntry,
-    ) -> Result<(), DataSourceError<Self::Error>> {
-        self.data_header.insert(*block, entry);
-        Ok(())
-    }
-
-    fn get_header(
-        &mut self,
-        block: &BlockHash,
-    ) -> Result<Option<OnchainHeaderEntry>, DataSourceError<Self::Error>> {
-        Ok(self.data_header.get(block).cloned())
-    }
-
-    fn remove_header(&mut self, block: &BlockHash) -> Result<(), DataSourceError<Self::Error>> {
-        self.data_header.remove(block);
-        Ok(())
-    }
-
-    fn insert_pegout_proposal(
-        &mut self,
-        txid: &Txid,
-        proposal: ProposalEntry,
-    ) -> Result<(), DataSourceError<Self::Error>> {
-        self.data_proposals.insert(*txid, proposal);
-        Ok(())
-    }
-
-    fn get_proposal(
-        &mut self,
-        txid: &Txid,
-    ) -> Result<Option<ProposalEntry>, DataSourceError<Self::Error>> {
-        Ok(self.data_proposals.get(txid).cloned())
-    }
-
-    fn finalize_proposal(&mut self, txid: &Txid) -> Result<(), DataSourceError<Self::Error>> {
-        let entry = self.data_proposals.remove(txid).unwrap();
-        let prev = self.trash_finalized_proposals.insert(*txid, entry);
-        assert!(prev.is_none());
-        Ok(())
-    }
-
-    fn orphan_proposal(&mut self, txid: &Txid) -> Result<(), DataSourceError<Self::Error>> {
-        let entry = self.data_proposals.remove(txid).unwrap();
-        let prev = self.trash_orphaned_proposals.insert(*txid, entry);
-        assert!(prev.is_none());
-        Ok(())
     }
 }
