@@ -1,0 +1,107 @@
+\section{Pool Management}
+\label{sec:pool-management}
+
+This section describes how DynaFed processes pegins and pegouts across the two-tier federation system introduced in section \ref{sec:two-tier-federations}. The core principle is straightforward: Tier 2 hot wallets should contain just enough funds to manage pegouts efficiently, while the Tier 1 cold wallet should minimize fund movements for maximum security.
+
+To achieve this balance, DynaFed employs several interconnected mechanisms:
+
+\begin{itemize}
+    \item \textbf{Dynamic Capacity Target} (section \ref{sec:dynamic-capacity-target}): An adaptive estimate of how much liquidity Tier 2 pools need, adjusting to recent pegout activity while filtering out short-term noise.
+    \item \textbf{Collateralization Level} (section \ref{sec:collateralization-level}): A measure of each Tier 2 pool's backing relative to its held funds, incorporating risk-adjusted stake from pool members to determine over- or under-collateralization.
+    \item \textbf{Pegin Allocation Logic} (section \ref{sec:pegin-allocation-logic}): Routing rules that direct incoming deposits to the appropriate pool, prioritizing over-collateralized Tier 2 pools while respecting the dynamic capacity target.
+    \item \textbf{Pegout Allocation Logic} (section \ref{sec:pegout-allocation-logic}): Selection criteria for which pool(s) should fulfill withdrawal requests, prioritizing deficit recovery in under-collateralized pools before distributing load across healthy pools.
+\end{itemize}
+
+Together, these mechanisms ensure that Tier 2 pools remain adequately funded and collateralized for responsive pegout fulfillment, while excess funds flow to the more secure Tier 1 pool.
+
+\subsection{Dynamic Capacity Target}
+\label{sec:dynamic-capacity-target}
+
+We use an exponentially weighted moving average (EWMA) with a smoothing factor to determine the dynamic capacity target for Tier 2 pools. This approach is inspired by TCP congestion control algorithms, which use similar techniques to estimate network conditions while filtering out transient spikes and noise.
+
+The EWMA formula is computationally efficient and requires minimal historical data retention, making it ideal for DynaFed to dynamically adjust the appropriate amount of funds to maintain in Tier 2 wallets. The target naturally increases during periods of high pegout activity and decreases during quieter periods, all while smoothing out unexpected network spikes.
+
+Specifically, we define the \textbf{dynamic capacity target} as:
+
+\begin{equation}
+    H(t) = \alpha \times P(t) + (1 - \alpha) \times H(t-1)
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $H(t)$ is the dynamic capacity target at time $t$ (block number)
+    \item $P(t)$ is the recent pegout volume (e.g., total pegout value over the last measurement period)
+    \item $\alpha$ is the smoothing factor, controlling the balance between responsiveness and stability
+\end{itemize}
+
+The smoothing factor $\alpha$ typically ranges from $0.1$ to $0.3$ for stable behavior, though higher values can be used when faster adaptation to changing pegout patterns is desired. In practice, the dynamic capacity target should also be bounded by a floor and ceiling, expressed as a percentage of total bridged funds, to prevent extreme values during periods of unusual activity.
+
+\subsection{Collateralization Level}
+\label{sec:collateralization-level}
+
+When DynaFed selects $M$ candidates to construct a Tier 2 pool, it applies a bias toward reliable and well-functioning members with larger amounts of staked funds as described in section \ref{sec:risk-assessment}. The total sum of all risk-adjusted staked funds across every member is considered the \textbf{total collateralization} of the Tier 2 pool $M$, denoted as:
+
+\begin{equation}
+    C_M = \sum_{m \in M} (S_m \times \phi(r_m))
+\end{equation}
+
+where $S_m$ represents the staked funds of member $m$ and $\phi(r_m)$ is the \textbf{risk adjustment factor} in the range $[0, 1]$ as defined in equation \ref{eq:risk-sigmoid}.
+
+A newly established Tier 2 pool initially starts with zero funds, denoted as $F_M = 0$, and gradually receives pegins allocated by DynaFed. As funds accumulate, we can compare the total funds against the collateralization level. When $F_M < C_M$, the pool is over-collateralized with a \textbf{collateralization surplus}. Conversely, when $F_M > C_M$, the pool is under-collateralized with a \textbf{collateralization deficit}.
+
+As noted in section \ref{sec:two-tier-federations}, DynaFed attempts to maintain over-collateralization for all Tier 2 pools. However, this depends on DynaFed's ability to select $M$ candidates whose total collateralization exceeds the dynamic capacity target described in section \ref{sec:dynamic-capacity-target}, which cannot be guaranteed. Since DynaFed mandates that at least one Tier 2 pool must be active at all times, \textbf{it does allow under-collateralized pools to exist}. In such cases, the security model falls back on the assumption that the majority of selected members are trustworthy. We consider this an acceptable trade-off given the operational requirements.
+
+\subsection{Pegin Allocation Logic}
+\label{sec:pegin-allocation-logic}
+
+DynaFed determines the appropriate destination for a pegin $p$ based on the resulting collateralization state after allocation. For a given Tier 2 pool, the post-allocation funds would be $F_M + p$, and we can evaluate:
+
+\begin{equation}
+    \Delta_{M,p} = C_M - (F_M + p)
+\end{equation}
+
+DynaFed follows this priority order when allocating pegins:
+
+\textbf{Priority 1}: Select the Tier 2 pool that remains most over-collateralized after receiving the pegin. This distributes deposits toward pools with greater collateral headroom.
+
+\textbf{Priority 2}: If no Tier 2 pool can maintain or achieve over-collateralization, DynaFed evaluates whether the pegin should be directed to the Tier 1 pool instead:
+
+\begin{equation}
+    \left(\sum_{M \in \text{Tier2}} F_M\right) + p > H(t)
+\end{equation}
+
+This checks if the total Tier 2 funds plus the new pegin would exceed the dynamic capacity target $H(t)$ at time $t$, as defined in section \ref{sec:dynamic-capacity-target}. If yes, the pegin should be \textbf{directed to the Tier 1 pool}. If no, DynaFed selects the Tier 2 pool with the lowest collateralization, minimizing the under-collateralization risk.
+
+This multi-tier decision process balances security (preferring over-collateralization), operational requirements (maintaining active hot wallets), and risk management (minimizing exposure when under-collateralization is unavoidable).
+
+\subsection{Pegout Allocation Logic}
+\label{sec:pegout-allocation-logic}
+
+Similar to pegin allocation logic described in section \ref{sec:pegin-allocation-logic}, DynaFed uses collateralization levels to determine which Tier 2 pool should honor pegout requests. However, pegouts offer more flexibility than pegins: while pegins require a single destination address for users to send funds to, pegouts can be fulfilled from multiple sources. DynaFed may select multiple Tier 2 pools as \textbf{candidates} to collectively honor pegout requests.
+
+For a given Tier 2 pool fulfilling one or more pegouts totaling $p$, the post-fulfillment funds would be $F_M - p$. We can evaluate the resulting collateralization state:
+
+\begin{equation}
+    \Delta_{M,p} = C_M - (F_M - p) = C_M - F_M + p
+\end{equation}
+
+Note that fulfilling a pegout \emph{increases} the collateralization surplus (or decreases the deficit) since funds are leaving the pool while the staked collateral remains constant.
+
+DynaFed follows this priority order when selecting candidate pools for pegout fulfillment:
+
+\textbf{Priority 1 - Deficit Recovery}: If any Tier 2 pool has a collateralization deficit, DynaFed allocates pegouts exclusively to that pool to reduce the deficit as quickly as possible. If multiple pools have deficits, DynaFed selects the pool with the largest deficit, prioritizing the highest-risk pool for immediate rebalancing.
+
+\textbf{Priority 2 - Distributed Fulfillment}: If all Tier 2 pools maintain a collateralization surplus, DynaFed selects all pools as candidates, distributing the pegout load across the system.
+
+Currently, Botanix does not charge a service fee for pegout fulfillment beyond the standard Bitcoin L1 network fee shared proportionally among all pegout recipients. The protocol assumes that candidates will honor pegouts in good faith as part of their validator duties. In the future, \textbf{an additional service fee could be introduced} to create explicit economic incentives for timely pegout fulfillment, integrating it more directly into the validator reward mechanism.
+
+\subsubsection{Future Enhancements}
+
+This allocation logic may be extended with additional metrics such as:
+\begin{itemize}
+    \item \textbf{Pool reliability scores} based on historical fulfillment performance
+    \item \textbf{Response time tracking} to prioritize faster candidates
+    \item \textbf{Dynamic candidate selection} that gradually excludes consistently unreliable pools
+\end{itemize}
+
+These enhancements would improve the robustness of the pegout system while maintaining the core collateralization-based security model.
