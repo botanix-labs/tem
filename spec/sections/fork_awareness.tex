@@ -1,0 +1,29 @@
+\section{Bitcoin Fork Awareness}
+\label{sec:bitcoin-fork-awareness}
+
+Pegout proposals must be tracked across the Bitcoin network to enable the entire Botanix validator set to deterministically establish when a pegout proposal has reached probabilistic finality, been replaced by an updated proposal, or been discarded due to a chain reorganization. This is achieved by \textbf{registering} both the transaction and the Bitcoin block in which it appears.
+
+The verification process operates in two stages:
+
+\begin{itemize}
+    \item \textbf{Block Header Verification}: The Bitcoin block header is verified by computing its hash and confirming that it falls below the Proof-of-Work target. The block's ancestry is validated by checking that its parent block has already been registered in the Foundation Layer, ensuring the block is part of a valid chain.
+    \item \textbf{Transaction Inclusion Verification}: A Merkle inclusion proof demonstrates that the transaction exists within the registered block. This proof is verified against the Merkle root stored in the block header, cryptographically confirming transaction inclusion without requiring full block data.
+\end{itemize}
+
+This dual verification mechanism enables the Foundation Layer to track Bitcoin chain state in a lightweight, deterministic manner. Validators independently verify pegout finality by observing registered blocks and their depth, handling Bitcoin forks and reorganizations without external oracles or trusted data feeds.
+
+\subsection{Block Tree Integration}
+
+The Foundation Layer maintains a \textbf{block tree} structure responsible for tracking Bitcoin chain state and resolving competing forks. The block tree exposes a single operation (specified in section \ref{btc:insert-prune}):
+
+\begin{equation}
+    \Pi(b_{\text{new}}) \rightarrow \{\text{fate}(b_1), \text{fate}(b_2), \ldots\}
+\end{equation}
+
+This operation inserts a new block $b_{\text{new}}$ into the tree and returns a set of pruned blocks with their classifications. Each $\text{fate}(b_i)$ indicates whether block $b_i$ has been:
+\begin{itemize}
+    \item \textbf{Finalized}: Part of the canonical chain with sufficient confirmation depth
+    \item \textbf{Orphaned}: Part of a rejected fork due to chain reorganization
+\end{itemize}
+
+The returned set may be empty if no blocks are pruned during the insertion. The complete block tree specification, including pruning criteria and classification logic, is detailed in section \ref{sec:block-tree}.
