@@ -1,0 +1,97 @@
+\documentclass[10pt,a4paper,twocolumn]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{pgfplots}
+\usepackage{xcolor}
+\usepackage{sectsty}
+\usepackage{quiver}
+\usepackage{mathtools}
+% Latin Modern fonts (includes sans-serif)
+\usepackage{lmodern}
+
+\pgfplotsset{compat=1.18}
+
+% Page color
+\definecolor{pagecolor}{HTML}{FAF9F6}
+\pagecolor{pagecolor}
+
+% Use sans-serif font throughout
+\renewcommand{\familydefault}{\sfdefault}
+
+% Make section headings sans-serif and bold
+\allsectionsfont{\sffamily\bfseries}
+
+\geometry{
+    a4paper,
+    left=20mm,
+    right=20mm,
+    top=25mm,
+    bottom=25mm,
+    columnsep=7mm
+}
+
+% Paragraph spacing
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+% Title information
+\title{
+    \includegraphics[width=3cm]{assets/botanix.png} \\
+    \Huge \textbf{DynaFed Whitepaper}
+}
+
+\author{
+    Fabio Lama\\
+    \small BotanixLabs\\
+    \small fabio@botanixlabs.xyz
+    \and
+    Darius Parvin\\
+    \small BotanixLabs\\
+    \small darius@botanixlabs.xyz
+}
+\date{
+    \vspace{1em}
+    \today \\
+    \small
+    \text{Revision 1 / Proof-of-Concept} \\[1em]
+    \textit{Edited \& refined by:}\\Claude.ai (Anthropic) \\[2em]
+    \footnotesize
+    \textcopyright{} 2025 BotanixLabs \\
+    \href{https://creativecommons.org/licenses/by/4.0/}{CC BY 4.0}
+}
+
+\begin{document}
+
+\maketitle
+
+\vspace*{1em}
+\begin{abstract}
+    DynaFed is a dynamic federation management protocol designed to enable secure and efficient Bitcoin custody for the Botanix layer 2 network. The protocol addresses the fundamental tension between security and operational efficiency in FROST threshold signature schemes by introducing a two-tier architecture: Tier 1 pools serve as large, conservative cold storage federations holding the majority of bridged funds, while Tier 2 pools operate as smaller, more flexible hot wallets optimized for low-latency withdrawal fulfillment. FROST's multi-round coordination protocol and static membership requirements create scalability bottlenecks that would be prohibitive for a single large federation, necessitating this architectural separation. DynaFed dynamically directs Bitcoin deposits and withdrawals based on real-time collateralization levels and network demand, using adaptive capacity estimation to adjust hot wallet reserves to changing withdrawal patterns. The system leverages Bitcoin's transaction output model as a core safeguard for operation atomicity and employs a lightweight fork-awareness algorithm that enables deterministic finality detection without external oracles. By maintaining collateralized hot wallets backed by cold storage reserves, DynaFed achieves a balance between the security guarantees of large federations and the operational responsiveness required for a production Bitcoin layer 2 network.
+\end{abstract}
+
+\clearpage
+\tableofcontents
+\clearpage
+
+% Include section files
+\input{sections/introduction}
+\input{sections/architecture}
+\input{sections/frost_challenge}
+\input{sections/two_tier_federations}
+\input{sections/pool_management}
+\input{sections/fork_awareness}
+\input{sections/risk_assessment}
+\input{sections/foundation_layer}
+
+\clearpage
+\input{sections/appendix}
+
+\end{document}
