@@ -1,0 +1,160 @@
+\section{Architecture}
+\label{sec:overview}
+
+The consensus engine is the core component of any permissionless blockchain system. Botanix uses CometBFT, one of the most adopted and robust Proof-of-Stake (PoS) engines, which acts as middleware between arbitrary application logic and the consensus layer. While CometBFT follows its own specification, it provides sufficient flexibility for us to control transaction structure, state transition interpretation, and validator selection decisions. CometBFT treats application logic as a black box; from its perspective, both transactions and their resulting state transitions are opaque.
+
+CometBFT operates as a standalone client $\mathcal{C}$ that communicates directly with other CometBFT clients, handling all consensus networking internally. However, because it is application-agnostic, CometBFT delegates transaction processing and state management to the application layer through the ABCI interface $\Delta$. The application logic $\Upsilon$ implements a handful of ABCI methods that the client uses to prepare block proposals, validate proposals, and finalize blocks.
+
+\begin{center}
+    % https://q.uiver.app/#q=WzAsNixbMiwyLCJcXG1hdGhjYWx7Q31fMSJdLFszLDMsIlxcbWF0aGNhbHtDfV8zIl0sWzAsMiwiXFxVcHNpbG9uXzEiXSxbMywxLCJcXG1hdGhjYWx7Q31fMiJdLFs0LDAsIlxcVXBzaWxvbl8yIl0sWzQsNCwiXFxVcHNpbG9uXzMiXSxbMCwzLCJcXHRleHRpdHtDb21ldEJGVH1cXFxcIFxcdGV4dGl0e1AyUH0iLDAseyJsYWJlbF9wb3NpdGlvbiI6NDAsImxldmVsIjoyLCJzdHlsZSI6eyJ0YWlsIjp7Im5hbWUiOiJhcnJvd2hlYWQifX19XSxbMCwxLCIiLDEseyJsZXZlbCI6Miwic3R5bGUiOnsidGFpbCI6eyJuYW1lIjoiYXJyb3doZWFkIn19fV0sWzEsMywiIiwxLHsibGV2ZWwiOjIsInN0eWxlIjp7InRhaWwiOnsibmFtZSI6ImFycm93aGVhZCJ9fX1dLFszLDQsIlxcRGVsdGFfe1xcY2RvdHN9IiwxLHsic3R5bGUiOnsidGFpbCI6eyJuYW1lIjoiYXJyb3doZWFkIn19fV0sWzEsNSwiXFxEZWx0YV97XFxjZG90c30iLDEseyJzdHlsZSI6eyJ0YWlsIjp7Im5hbWUiOiJhcnJvd2hlYWQifX19XSxbMCwyLCJcXERlbHRhX3tcXGNkb3RzfSIsMSx7InN0eWxlIjp7InRhaWwiOnsibmFtZSI6ImFycm93aGVhZCJ9fX1dLFs0LDUsIiIsMSx7InN0eWxlIjp7InRhaWwiOnsibmFtZSI6ImFycm93aGVhZCJ9fX1dLFs0LDIsIlxcdGV4dGl0e0V0aGVyZXVtfVxcXFwgXFx0ZXh0aXR7UDJQfSIsMix7ImxhYmVsX3Bvc2l0aW9uIjo4MCwiY3VydmUiOjUsInN0eWxlIjp7InRhaWwiOnsibmFtZSI6ImFycm93aGVhZCJ9fX1dLFs1LDIsIiIsMSx7ImN1cnZlIjotNSwic3R5bGUiOnsidGFpbCI6eyJuYW1lIjoiYXJyb3doZWFkIn19fV1d
+    \begin{tikzcd}
+        &&&& {\Upsilon_2} \\
+        &&& {\mathcal{C}_2} \\
+        {\Upsilon_1} && {\mathcal{C}_1} \\
+        &&& {\mathcal{C}_3} \\
+        &&&& {\Upsilon_3}
+        \arrow["\begin{array}{c} \textit{Ethereum}\\ \textit{P2P} \end{array}"'{pos=0.8}, curve={height=30pt}, tail reversed, from=1-5, to=3-1]
+        \arrow[tail reversed, from=1-5, to=5-5]
+        \arrow["{\Delta_{\cdots}}"{description}, tail reversed, from=2-4, to=1-5]
+        \arrow["\begin{array}{c} \textit{CometBFT}\\ \textit{P2P} \end{array}"{pos=0.4}, Rightarrow, 2tail reversed, from=3-3, to=2-4]
+        \arrow["{\Delta_{\cdots}}"{description}, tail reversed, from=3-3, to=3-1]
+        \arrow[Rightarrow, 2tail reversed, from=3-3, to=4-4]
+        \arrow[Rightarrow, 2tail reversed, from=4-4, to=2-4]
+        \arrow["{\Delta_{\cdots}}"{description}, tail reversed, from=4-4, to=5-5]
+        \arrow[curve={height=-30pt}, tail reversed, from=5-5, to=3-1]
+    \end{tikzcd}
+
+    \vspace{0.5em}
+    \small{Three validators communicating, where each pair $(\mathcal{C}_n, \Upsilon_n)$ represents a complete validator node. $\mathcal{C}_n$ is the CometBFT consensus client and $\Upsilon_n$ is the application layer.}
+\end{center}
+
+Since Botanix is an EVM-compatible chain, we reuse Ethereum's execution layer while replacing Ethereum's native consensus with CometBFT. Currently, all network participants (validators and non-validators alike) must run the CometBFT client, which handles transaction gossiping and block finalization. Ethereum's P2P block propagation is disabled in favor of CometBFT's networking layer. Future protocol versions may revisit this architecture to allow non-validators to sync via alternative mechanisms.
+
+The most significant ABCI interfaces that $\Upsilon$ must implement are $\Delta_{\text{prepare}}$, $\Delta_{\text{process}}$, and $\Delta_{\text{finalize}}$. The consensus client $\mathcal{C}$ invokes each interface according to its internal specification and the current consensus state.
+
+\[
+    \mathcal{C} \mathrel{\substack{\longrightarrow \\ \longleftarrow}}
+    \left\{
+    \begin{aligned}
+         & \Delta_{\text{prepare}}  &  & \text{construct block proposal} \\
+         & \Delta_{\text{process}}  &  & \text{validate proposed block}  \\
+         & \Delta_{\text{finalize}} &  & \text{commit finalized block}   \\
+         & \Delta_{\cdots}          &  & \cdots
+    \end{aligned}
+    \right\}
+    \mathrel{\substack{\longrightarrow \\ \longleftarrow}} \Upsilon
+\]
+
+An important aspect of CometBFT is that it establishes consensus on transactions, not blocks. This means that state changes must be perfectly reproducible from the agreed-upon list and order of transactions. To support Botanix-specific coordination logic, we reserve the first transaction slot in every block for \textbf{Non-Deterministic Data} (NDD), denoted $\gamma$. This special transaction is constructed by the block producer and executed by the \textbf{Foundation Layer} $\mathcal{F}$. It contains off-chain coordination messages that cannot be derived deterministically from prior state alone, but is still validated according to $\mathcal{F}$'s consensus rules. The last element in $\gamma$ is always the \textbf{Foundation state proof} $\mathcal{F}^{\Phi}$, as defined in section~\ref{sec:foundation-state-proof-structure}:
+
+\[
+    \gamma_{|\gamma|} = \mathcal{F}^{\Phi}
+\]
+
+The Foundation Layer is described in more detail in section \ref{sec:foundation-layer}.
+
+\subsection{Block Proposal Construction}
+
+When $\mathcal{C}$ decides to construct a block proposal by calling $\Delta_{\text{prepare}}$ on $\Upsilon$, the endpoint combines two distinct sources: the Foundation Layer produces $\gamma$, while the standard Ethereum transaction pool $\mathcal{E}_{\text{pool}}$ provides user transactions. The resulting proposal always places $\gamma$ first:
+
+\begin{center}
+    \begin{equation*}
+        \begin{aligned}
+             & \lambda[\gamma, \mathbb{T}] \leftarrow \Upsilon.\Delta_{\text{prepare}} :=
+            \begin{cases}
+                \gamma \leftarrow \mathcal{F}                   \\
+                \texttt{rollback}(\mathcal{F})                  \\
+                \mathbb{T} \leftarrow \mathcal{E}_{\text{pool}} \\
+                \texttt{return } [\gamma, \mathbb{T}]
+            \end{cases}                              \\
+             & \quad \text{where } \mathbb{T} = [t_i]_{i=1}^n
+        \end{aligned}
+    \end{equation*}
+
+    \vspace{0.5em}
+    \small{Note: \texttt{rollback()} discards tentative state changes and returns to the previous block's state. This allows validation to occur without persisting changes until finalization.}
+\end{center}
+
+The function returns a CometBFT-constructed structure $\lambda$ that includes additional consensus-related information (validator selection, evidence of equivocation, etc.), with the NDD $\gamma$ at position zero followed by an ordered list of transactions $\mathbb{T}$, which may be empty. The EVM state proof $\mathcal{E}_{\text{vm}}^{\Phi}$ is placed in the structure's \textit{appHash} field, following standard CometBFT convention. The Foundation state proof $\mathcal{F}^{\Phi}$ is embedded in the Ethereum block's \textbf{extra data header}, making it part of $\mathcal{E}_{\text{vm}}^{\Phi}$. Consequently, both proofs are transitively committed in the \textit{appHash}.
+
+Formally:
+\[
+    \{\mathcal{E}_{\text{vm}}^{\Phi}, \mathcal{F}^{\Phi}\} \subseteq \lambda.\textit{appHash}
+\]
+
+\subsection{Block Proposal Validation \& Finalization}
+
+When $\mathcal{C}$ receives a block proposal $\lambda[\gamma, \mathbb{T}]$ from a peer, it submits the proposal to the $\Delta_{\text{process}}$ validation function of $\Upsilon$. The validation process first extracts and validates $\gamma$ (which must be present), passing it to the Foundation Layer for verification. The remaining transactions $\mathbb{T}$ are then passed to the Ethereum EVM $\mathcal{E}_{\text{vm}}$ for standard execution validation:
+
+\begin{equation*}
+    \begin{aligned}
+         & \begin{rcases}
+               \lambda[\gamma, \mathbb{T}] & \rightarrow \\
+               f                           & \leftarrow
+           \end{rcases}
+        \Upsilon.\Delta_{\text{process}} :=
+        \begin{cases}
+            \gamma \rightarrow \mathcal{F}                 \\
+            \mathbb{T} \rightarrow \mathcal{E}_{\text{vm}} \\
+            \texttt{rollback}(\mathcal{E}_{\text{vm}})     \\
+            \texttt{rollback}(\mathcal{F})                 \\
+            \texttt{return } f
+        \end{cases}                                     \\
+         & \quad \text{where } \mathcal{C} \text{ validates } \lambda.\texttt{appHash}\stackrel{?}{=}f.\texttt{appHash}
+    \end{aligned}
+\end{equation*}
+
+where $f$ is a validation result indicating whether the proposal is accepted or rejected by the consensus rules. A block is only considered \textbf{canonical} (i.e., finalized) after $\mathcal{C}$ calls $\Delta_{\text{finalize}}$, which replicates the behavior of $\Delta_{\text{process}}$ with the critical exception that state changes are now \textbf{committed} (persisted and canonical) rather than rolled back:
+
+\begin{equation*}
+    \begin{aligned}
+        \begin{rcases}
+            \lambda[\gamma, \mathbb{T}] & \rightarrow \\
+            f                           & \leftarrow  \\
+        \end{rcases}
+        \Upsilon.\Delta_{\text{finalize}} :=
+        \begin{cases}
+            \gamma \rightarrow \mathcal{F}                 \\
+            \texttt{commit}(\mathcal{F})                   \\
+            \mathbb{T} \rightarrow \mathcal{E}_{\text{vm}} \\
+            \texttt{commit}(\mathcal{E}_{\text{vm}})       \\
+            \texttt{return } f
+        \end{cases}
+    \end{aligned}
+\end{equation*}
+
+\subsection{System Flow: Pegin Lifecycle}
+
+When a user deposits Bitcoin into Botanix:
+
+\begin{enumerate}
+    \item User constructs a Bitcoin transaction sending funds to a multisig address controlled by either a Tier 1 or Tier 2 pool
+    \item DynaFed routing logic (section \ref{sec:pegin-allocation-logic}) determines the destination based on:
+          \begin{itemize}
+              \item Dynamic capacity target $H(t)$ (section \ref{sec:dynamic-capacity-target})
+              \item Current collateralization levels of Tier 2 pools (\ref{sec:collateralization-level})
+              \item Risk-adjusted collateral availability (\ref{sec:risk-assessment})
+          \end{itemize}
+    \item Once the Bitcoin transaction achieves sufficient confirmations, the Foundation Layer registers it
+    \item The EVM layer mints corresponding tokens to the user's Botanix address
+\end{enumerate}
+
+\subsection{System Flow: Pegout Lifecycle}
+
+When a user withdraws Bitcoin from Botanix:
+
+\begin{enumerate}
+    \item User burns tokens on the EVM layer via a dedicated smart contract, triggering a pegout request
+    \item The Foundation Layer records the pegout as \textbf{unassigned} with a list of qualified candidate pools
+    \item DynaFed's pegout allocation logic (section \ref{sec:pool-management}) selects which Tier 2 pool(s) should fulfill the request based on:
+          \begin{itemize}
+              \item Collateralization deficits (priority to under-collateralized pools)
+              \item Load distribution across healthy pools
+              \item Risk assessment scores (section \ref{sec:risk-assessment})
+              \item Fallback to Tier 1 pool if the amount exceeds funds
+          \end{itemize}
+    \item The selected pool's representative submits a \textbf{proposal} to the Foundation Layer (section \ref{sec:pegout-proposals}), coupling the pegout with specific UTXOs
+    \item Pool members coordinate off-chain via FROST to sign the Bitcoin transaction
+    \item Once the transaction appears in a Bitcoin block and achieves finality depth, the Foundation Layer classifies it as \textbf{finalized}
+    \item The block tree pruning algorithm (section \ref{sec:block-tree}) automatically handles any Bitcoin forks
+\end{enumerate}
