@@ -1,0 +1,10 @@
+\section{The FROST Challenge}
+\label{sec:frost-challenge}
+
+The FROST threshold signature protocol presents a fundamental scalability challenge for federation design. DKG setup requires multiple rounds of package exchanges between all participants, creating significant coordination overhead. While DynaFed can schedule DKG processes asynchronously where timing is less critical, the two-round signing protocol for pegout fulfillment remains a bottleneck, with larger federations facing increased message complexity, higher failure rates, and greater coordination burden.
+
+This creates a tension between security and operational efficiency. Larger federations provide stronger security guarantees but struggle with FROST's coordination requirements. Smaller federations operate more efficiently but offer weaker security and are more vulnerable to attacks.
+
+To address this tradeoff, we propose a two-tier federation system as described in section \ref{sec:two-tier-federations}. Tier 1 serves as a large ``cold wallet'' responsible for holding the majority of funds with maximum security. Tier 2 operates as a smaller ``hot wallet'' optimized for responsive pegout fulfillment. This separation allows each tier to play to its strengths: Tier 1 prioritizes security through size, while Tier 2 prioritizes operational efficiency through agility.
+
+See appendix \ref{appendix:dkg-message-complexity} for a detailed breakdown of message complexity.

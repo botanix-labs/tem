@@ -1,0 +1,269 @@
+\section{Appendix}
+
+This appendix provides technical details and derivations referenced throughout the main text.
+
+\subsection{DKG: Message Complexity}
+\label{appendix:dkg-message-complexity}
+
+This appendix provides a detailed breakdown of the message complexity for FROST DKG setup, as referenced in section \ref{sec:frost-challenge}. We measure the number of \textbf{messages that must be sent over the wire}, where the coordinator functions not only as a participant in the multisig setup, but also as a message forwarder/router.
+
+We examine two approaches: \textbf{with and without message bundling}. The key difference is that with bundling, the coordinator waits until all messages per round are received, then sends all necessary packages to each non-coordinator as a single bundle. This applies to both received and sent messages in round 2. Without bundling, the coordinator forwards each package individually as they are received.
+
+\subsubsection{Comparison}
+
+Bundling reduces message complexity from quadratic $O(n^2)$ to linear $O(n)$:
+
+\begin{itemize}
+    \item \textbf{Without bundling}: $3n^2-5n+2$ messages
+    \item \textbf{With bundling}: $4n-4$ messages
+\end{itemize}
+
+For example, with $n=32$ participants:
+\begin{itemize}
+    \item Without bundling: 2,914 messages
+    \item With bundling: 124 messages
+\end{itemize}
+
+With $n=64$ participants:
+\begin{itemize}
+    \item Without bundling: 11,970 messages
+    \item With bundling: 252 messages
+\end{itemize}
+
+And with $n=128$ participants:
+\begin{itemize}
+    \item Without bundling: 48,514 messages
+    \item With bundling: 508 messages
+\end{itemize}
+
+Bundling represents a \textbf{significant reduction} in message count, though at the cost of larger individual message sizes.
+
+\subsubsection{With Bundling}
+
+The coordinator waits until all messages per round are received, then sends all necessary packages to each non-coordinator as a \textbf{single bundle}. This applies to both round 1 and round 2.
+
+\paragraph{Each Round}
+
+Each non-coordinator sends their package to the coordinator. Since the coordinator already has their own package, they receive the following number of messages over the wire:
+
+\[n-1\]
+
+The coordinator then forwards all packages as a single bundle to each of the $n-1$ non-coordinator member (excluding themselves), sending:
+
+\[n-1\]
+
+Total messages per round:
+
+\[(n-1)+(n-1) = 2n-2\]
+
+\paragraph{Total}
+
+The total message complexity across both round 1 and round 2:
+
+\begin{equation}
+\begin{aligned}
+2\times (2n-2)\\ = 4n-4
+\end{aligned}
+\end{equation}
+
+\subsubsection{Without Bundling}
+
+The coordinator forwards each package individually rather than bundling them together. While this keeps individual message sizes smaller, it significantly increases the total message count.
+
+\paragraph{Round 1}
+
+Each non-coordinator sends their package to the coordinator. Since the coordinator already has their own package, they receive the following number of messages over the wire:
+
+\[n-1\]
+
+The coordinator forwards each of the $n-1$ packages to each of the $n-1$ non-coordinators (excluding themselves), sending:
+
+\[(n-1)(n-1) = n^2-2n+1\]
+
+Total messages for round 1:
+
+\[(n-1)+(n^2-2n+1) = n^2-n\]
+
+\paragraph{Round 2}
+
+Each non-coordinator creates individual packages for each other member (excluding themselves), sending $n-1$ packages to the coordinator. Since the coordinator already has their own packages, they receive the following number of messages over the wire:
+
+\[(n-1)(n-1) = n^2-2n+1\]
+
+The coordinator then forwards each individual package to its corresponding recipient (excluding themselves), sending:
+
+\[(n-1)(n-1) = n^2-2n+1\]
+
+Total messages for round 2:
+
+\[(n^2-2n+1)+(n^2-2n+1) = 2n^2-4n+2\]
+
+\paragraph{Total}
+
+The total message complexity across both round 1 and round 2:
+
+\begin{equation}
+\begin{aligned}
+(n^2-n)+(2n^2-4n+2)\\= 3n^2-5n+2
+\end{aligned}
+\end{equation}
+
+\subsection{Block Tree}
+\label{sec:block-tree}
+
+The block tree maintains a lightweight representation of the Bitcoin blockchain, tracking competing forks and automatically pruning blocks as they reach sufficient confirmation depth. This structure enables deterministic fork resolution across all Botanix validators without requiring full Bitcoin node synchronization.
+
+The block tree serves two critical functions:
+\begin{itemize}
+    \item \textbf{Fork Detection}: Identifies competing Bitcoin chains and preserves unresolved forks until one becomes canonical
+    \item \textbf{Automatic Pruning}: Removes blocks that have either reached finality or been orphaned, preventing unbounded memory growth
+\end{itemize}
+
+The theoretical motivation for Bitcoin fork awareness and its role in pegout finality is described in section \ref{sec:bitcoin-fork-awareness}. This section provides the technical specification for the block tree data structure and its operations.
+
+\subsubsection{Core Definitions}
+
+Let $B$ denote the set of all blocks in the tree, where each block $b \in B$ has:
+\begin{itemize}
+    \item A block hash $h(b)$
+    \item A parent hash $p(b)$
+    \item A set of children $C(b) \subseteq B$
+    \item A relative height $r(b) \in \mathbb{N}$, defined as the distance from the tree's root (elder)
+\end{itemize}
+
+We define:
+\begin{itemize}
+    \item $T \subseteq B$: the set of tips (blocks with no children, i.e., $C(b) = \emptyset$)
+    \item $e \in B$: the elder (oldest retained block with $r(e) = \min_{b \in B} r(b)$)
+    \item $h_{best} = \max_{b \in B} r(b)$: the best (maximum) height in the tree
+    \item $d_{conf}$: the confirmation depth parameter (minimum 3)
+\end{itemize}
+
+\subsubsection{Block Insertion and Pruning}
+\label{btc:insert-prune}
+
+The block insertion operation processes a new Bitcoin block and automatically prunes finalized and orphaned blocks:
+
+\begin{equation}
+\Pi(b_{new}) \rightarrow \{\text{fate}(b_1), \text{fate}(b_2), \ldots\}
+\end{equation}
+
+This operation inserts the new block, performs two-phase pruning, and returns the possibly empty set of pruned blocks with their classifications as defined in section \ref{sec:fork-block-classification}.
+
+When inserting a new block $b_{new}$ with parent $b_{parent}$:
+
+\begin{enumerate}
+    \item \text{Height assignment}:
+    
+    \[r(b_{new}) = r(b_{parent}) + 1\]
+    
+    \item \text{Relationship update}:
+    
+    \[C(b_{parent}) := C(b_{parent}) \cup \{b_{new}\}\]
+    
+    \item \text{Tip update}:
+
+    \[T := (T \setminus \{b_{parent}\}) \cup \{b_{new}\}\]
+    
+    \item \text{Best height update}:
+    
+    \[\textit{If } r(b_{new}) > h_{best}\textit{, then } h_{best} := r(b_{new})\]
+\end{enumerate}
+
+Following insertion, the tree is automatically pruned in two phases:
+
+\begin{enumerate}
+    \item \textbf{Backward pruning}: Remove orphaned forks from tips as defined in section \ref{sec:fork-backward-pruning}, enabling forward progress
+    \item \textbf{Forward pruning}: Remove finalized blocks from the elder as defined in section \ref{sec:fork-forward-pruning}, advancing the elder forward
+\end{enumerate}
+
+This two-phase approach ensures that orphaned forks don't block forward pruning of the canonical chain, that unresolved forks prevent premature finalization, and that the elder always represents the oldest block in any active chain.
+
+\subsubsection{Pruning Criteria}
+
+A block $b$ becomes eligible for pruning when:
+
+\begin{equation}
+r(b) \leq h_{best} - (d_{conf} - 1)
+\end{equation}
+
+This defines the \textbf{pruning threshold}:
+\begin{equation}
+h_{prune} = h_{best} - (d_{conf} - 1)
+\end{equation}
+
+\subsubsection{Backward Pruning (Orphaned)}
+\label{sec:fork-backward-pruning}
+
+For each tip $t \in T$, the algorithm checks if the tip represents an orphaned fork by traversing backward toward the elder. A tip $t$ is orphaned if:
+
+\begin{equation}
+r(t) \leq h_{prune}
+\end{equation}
+
+The backward traversal removes parent-child relationships and prunes childless blocks:
+
+\begin{enumerate}
+    \item For a block $b$ with child $c$ (or tip if $c = \emptyset$):
+    \begin{itemize}
+        \item \textit{If} $r(b) \leq h_{prune}$ and a child exists:
+        
+        \[C(b) := C(b) \setminus \{c\}\]
+        
+        \item \textit{If} $C(b) = \emptyset$ after removal: remove $b$ from $B$ and classify as \textbf{orphaned}
+        \item Recursively process parent $p(b)$
+    \end{itemize}
+    
+    \item Termination occurs when:
+    \begin{itemize}
+        \item $r(b) > h_{prune}$ (block is too recent), or
+        \item The parent has been reached that still has other children: $C(b) \neq \emptyset$
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Forward Pruning (Finalized)}
+\label{sec:fork-forward-pruning}
+
+Starting from the elder $e$, the algorithm prunes finalized blocks that satisfy all of the following conditions:
+
+\begin{enumerate}
+    \item \text{Depth condition}:
+    
+    \[r(e) \leq h_{prune}\]
+    
+    \item \text{No fork condition (exactly one child)}:
+    
+    \[|C(e)| = 1\]
+\end{enumerate}
+
+The forward pruning process recursively follows the chain:
+
+\begin{equation}
+e' = \begin{cases}
+c & \text{if } r(e) \leq h_{prune} \land |C(e)| = 1 \\
+e & \text{otherwise}
+\end{cases}
+\end{equation}
+
+where $c$ is the unique child in $C(e)$. Each pruned block is classified as \textbf{finalized}.
+
+The algorithm terminates when it encounters a block that either:
+
+\begin{itemize}
+    \item Is above the pruning threshold: $r(e) > h_{prune}$, or
+    \item Has multiple children: $|C(e)| > 1$, indicating an unresolved fork
+\end{itemize}
+
+\subsubsection{Block Classification}
+\label{sec:fork-block-classification}
+
+Pruned blocks are classified as:
+
+\begin{equation}
+\text{fate}(b) = \begin{cases}
+\text{Finalized} & \text{if pruned via forward traversal} \\
+\text{Orphaned} & \text{if pruned via backward traversal}
+\end{cases}
+\end{equation}
+
+This classification determines the handling of associated pegouts: finalized blocks indicate permanent confirmation, while orphaned blocks require returning pegouts to the pending set.

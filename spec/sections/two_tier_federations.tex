@@ -1,0 +1,72 @@
+\section{Two-Tier Federations}
+\label{sec:two-tier-federations}
+
+We generally want funds to be as secure as possible, which suggests keeping them in the largest federation practical. However, larger federations have drawbacks: increased message complexity, reduced flexibility, and higher failure rates for operations like DKG processes and pegout signing requests as expanded on in section \ref{sec:frost-challenge}.
+
+Fortunately, we can leverage a key observation: the majority of funds remain dormant with minimal movement, while only a small subset is actively used for pegouts. This allows us to structure a system that addresses both security and operational efficiency requirements:
+
+\begin{itemize}
+    \item \textbf{Tier 1} serves as the larger ``cold wallet'' where the majority of funds remain secured
+    \item \textbf{Tier 2} serves as the smaller ``hot wallet'' responsible for honoring pegouts
+\end{itemize}
+
+DynaFed ensures that Tier 2 funds are substantially collateralized on Tier 1, \emph{ideally} at 100\%. This collateralization model provides several benefits:
+
+\begin{itemize}
+    \item \textbf{Reduced risk}: Tier 2 failures have limited impact due to collateral backing
+    \item \textbf{Increased flexibility}: We can experiment with different federation sizes, collateralization requirements, and rotation schedules for Tier 2
+    \item \textbf{Lower barriers}: We can accept newer or less-established CometBFT validators into Tier 2
+\end{itemize}
+
+\textbf{Note:} While we generally refer to Bitcoin multisigs as federations, we'll adopt the term \textbf{pools} going forward, which aligns better with how the broader crypto and DeFi ecosystem conceptualizes fund movements and custody.
+
+\subsection{Tier 1 Architecture}
+
+Tier 1 serves as the primary cold storage federation, holding the majority of bridged funds with maximum security guarantees. DynaFed maintains \textbf{exactly one active Tier 1 federation} under normal operation, though multiple Tier 1 pools may temporarily coexist during migration periods when an old pool  is being sunset in favor of a new pool.
+
+The Tier 1 federation is intentionally large and conservative in its membership. DynaFed selects the most reliable, established, and senior members of the CometBFT validator set for this critical role. This selection bias reflects the security-first mandate of cold storage:
+
+\begin{itemize}
+    \item \textbf{High barriers to entry}: New validators face significant hurdles to joining Tier 1, requiring demonstrated reliability and stake history
+    \item \textbf{Membership stability}: Established Tier 1 members are rarely removed unless they exhibit clear unreliability or misconduct
+    \item \textbf{Reputation weighting}: Long-standing validators with proven track records receive priority over newer participants
+\end{itemize}
+
+This conservative approach prioritizes security and stability over operational flexibility, which is appropriate given that Tier 1 holds the bulk of user funds. Validators seeking to participate in the federation typically begin in Tier 2 pools, where they can establish their reliability before being considered for Tier 1 membership.
+
+\subsection{Tier 2 Architecture}
+
+Tier 2 pools serve as operational hot wallets, holding a smaller subset of funds optimized for fulfilling pegout requests with minimal latency. These pools are intentionally smaller than Tier 1, allowing for more flexible federation management including faster rotation schedules, lower barriers to entry for validators, and more dynamic collateralization requirements.
+
+This proposal assumes the existence of \textbf{multiple Tier 2 pools}, and DynaFed is designed to manage routing and collateralization across all active Tier 2 pools simultaneously. This multi-pool architecture provides several benefits:
+
+\begin{itemize}
+    \item \textbf{Load distribution}: Pegout requests can be distributed across multiple pools, reducing the operational burden on any single federation
+    \item \textbf{Risk diversification}: Exposure is distributed across multiple Tier 2 pools, limiting the impact if any single pool's funds exceed its members' staked collateral.
+    \item \textbf{Gradual migration}: New pools can be introduced while existing pools are phased out without service interruption
+    \item \textbf{Specialization potential}: Different pools could eventually serve different use cases or security profiles
+\end{itemize}
+
+In practice, especially during initial deployment, there may be only a single active Tier 2 pool at any given time (excluding transitionary periods during pool migration). However, the protocol is designed from the ground up to handle multiple concurrent pools, ensuring the architecture can scale as network demand grows.
+
+\subsubsection{Future Extensibility}
+
+This architecture also enables a future extension where Tier 2 could become truly open to external service providers and third parties who are not part of the CometBFT validator set. However, such external participants would be subject to a mandatory 100\% collateralization requirement.
+
+\subsection{Staking, Deposits \& Collateralization}
+
+Botanix is a Proof-of-Stake (PoS) network that follows the core concepts and mechanisms that have become standardized across the PoS ecosystem. Staking, the practice of locking funds that can be penalized ("slashed") for misbehavior, forms the core of the network's security model. It serves dual purposes: determining who has the right to participate in network consensus, and making attacks economically expensive, if not practically impossible.
+
+Unlike many PoS networks, Botanix does not have its own floating cryptocurrency. Instead, users deposit Bitcoin into the network, which can be minted and redeemed at a 1:1 ratio. These minted coins function similarly to native tokens in other PoS networks, enabling both economic activity and consensus participation.
+
+Users can utilize minted coins for transactions and smart contract interactions in their liquid form. However, to gain voting rights for consensus-critical operations, coins must be explicitly \textbf{staked}. This staking process locks coins for a specific duration, rendering them illiquid. Conversely, \textbf{unstaked} coins remain liquid from a Botanix consensus perspective, though they may still be subject to smart contract-specific restrictions.
+
+The distinction between \textbf{unstaked} and \textbf{staked} funds - or equivalently, liquid and illiquid funds - directly determines:
+
+\begin{itemize}
+    \item How collateralization levels are calculated for multisig federations
+    \item How DynaFed directs pegins to appropriate federations
+    \item Which multisig federation is responsible for honoring pegouts
+\end{itemize}
+
+This relationship is described in detail in the Pool Management section \ref{sec:pool-management}.

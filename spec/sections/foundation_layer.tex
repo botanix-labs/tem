@@ -1,0 +1,137 @@
+\section{The Foundation Layer}
+\label{sec:foundation-layer}
+
+The Foundation Layer is the central coordination component that orchestrates Botanix's multisig federation system. It integrates several subsystems described throughout this paper:
+
+\begin{itemize}
+    \item \textbf{Pool Management} (section \ref{sec:pool-management}): Pegin and pegout allocation across the two-tier federation architecture
+    \item \textbf{Risk Assessment} (section \ref{sec:risk-assessment}): Pool health monitoring and lifecycle management
+    \item \textbf{Bitcoin Fork Awareness} (section \ref{sec:bitcoin-fork-awareness}): Tracking pegout proposals across Bitcoin's probabilistic finality model
+    \item \textbf{State Commitments} (section \ref{sec:foundation-state-proof}): Cryptographic proofs enabling deterministic validation across all validators
+\end{itemize}
+
+As described in section \ref{sec:overview}, the Foundation Layer produces the \textbf{Non-Deterministic Data (NDD)} $\gamma$ included in every block. While the NDD is constructed subjectively by the block producer, all validators verify its contents against the Foundation Layer's consensus rules. This design enables off-chain coordination, such as FROST signing rounds and pegout batching, to be anchored on-chain without requiring validators to track external state.
+
+The NDD supports the following message types:
+
+\begin{itemize}
+    \item \textbf{Pegout Proposal} (section~\ref{sec:pegout-proposals}): Submits a new proposal, upgrades an existing proposal (section~\ref{sec:pegout-proposal-upgrade}), or cancels a proposal (section~\ref{sec:pegout-proposal-cancellation}). This message type also covers fund sweeping during pool migration and sunsetting operations.
+    \item \textbf{Bitcoin Header} (section~\ref{sec:bitcoin-fork-awareness}): Registers a new Bitcoin block header, validated by verifying that its hash falls below the Proof-of-Work target and that its parent is already known to the Foundation Layer.
+    \item \textbf{Bitcoin Transaction} (section~\ref{sec:bitcoin-fork-awareness}): Associates a pegout proposal with a registered Bitcoin block via a Merkle inclusion proof, enabling finality tracking.
+    \item \textbf{FROST Signature Proof} (section~\ref{sec:participation-score}): Demonstrates that a pool member possesses valid key material and is actively participating in consensus. These proofs feed into the participation score used for risk assessment.
+\end{itemize}
+
+\textbf{Note}: The NDD message format is designed for extensibility. Future protocol versions may introduce additional message types for staking, slashing, and other consensus-critical operations.
+
+The Foundation Layer operates on a critical principle: it treats all input as potentially malicious, verifies input through cryptographic proofs, and makes decisions based solely on provided inputs without requiring access to external networks. This self-contained verification model ensures that validators reach consensus on Foundation state without relying on external oracles or subjective observations of the Bitcoin network.
+
+\subsection{Pegout Proposals}
+\label{sec:pegout-proposals}
+
+Bitcoin uses a probabilistic finality system rather than deterministic finality. We assume that after sufficient time and spent resources, a reorganization becomes economically unviable if not practically impossible. However, given this probabilistic nature and competing blocks, the Foundation Layer must be fork-aware and consider various scenarios:
+
+\begin{itemize}
+    \item A Bitcoin transaction can be rejected by nodes or miners even though it's valid under consensus rules. For example, if fee rates are unattractive, local mempool policies differ, or other configurable parameters aren't met. Different nodes and miners may have conflicting views on which transactions to propagate or include.
+    \item A previously rejected transaction might later be picked up and propagated, potentially remaining unconfirmed for extended periods.
+    \item A Bitcoin transaction might need to be accelerated or replaced by DynaFed. There's no guarantee that a replacement transaction will take precedence over the original.
+    \item Even if a transaction is widely propagated, miners may choose not to include it in a block for arbitrary reasons. Fundamentally, there's no way to deterministically or objectively determine whether a Bitcoin transaction will be mined.
+\end{itemize}
+
+In our Foundation Layer model, \textbf{UTXO reuse} becomes the key safeguard that anchors our entire system, especially when integrated with the TEE/TEM architecture. This dramatically reduces state management complexity. Pegouts are categorized in one of two states:
+
+\begin{itemize}
+    \item \textbf{Unassigned}: Fresh pegouts that have been triggered on the Botanix EVM but not yet included in any proposal.
+    \item \textbf{Proposed}: Pegouts that are part of a proposed Bitcoin transaction, coupled with the selected UTXO(s).
+\end{itemize}
+
+Critically, a pegout proposal must be submitted to the Foundation Layer before multisig members sign the PSBT. The coordinator or representative of a multisig federation must first include their proposal in the Foundation Layer, and only then will other members accept signing the proposal off-chain. That proposal remains in the Proposed state until it's finalized, or gets removed by a competing transaction being finalized first.
+
+The Foundation Layer enforces a crucial invariant: \textbf{pegouts and UTXOs in a proposal are tightly coupled}. The layer will only allow replacing or updating proposals if the updated (competing) proposal reuses at least one UTXO from the original. This means that if multiple Bitcoin transactions all share at least one UTXO, we have a core guarantee that \textbf{only one will become probabilistically finalized}, the others will fail due to the spent UTXO. This elegant property handles forks, replacements, and race conditions without complex state tracking.
+
+\subsubsection{Updating Proposal}
+\label{sec:pegout-proposal-upgrade}
+
+Federation representatives may need to update an existing pegout proposal to adjust transaction parameters such as fee rates, consolidate additional pegouts, or respond to changing mempool conditions. The Foundation Layer supports proposal updates through a replacement mechanism anchored by UTXO reuse.
+
+To update a proposal, the representative submits a new proposal that satisfies two requirements:
+
+\begin{itemize}
+    \item \textbf{UTXO continuity}: The new proposal must reuse at least one UTXO from the original proposal, establishing a link between the two versions
+    \item \textbf{Federation authorization}: Only the original proposing federation can submit updates, verified through the federation identifier
+\end{itemize}
+
+This mechanism enables common operations such as:
+
+\begin{itemize}
+    \item \textbf{Fee adjustment}: Replacing a low-fee transaction with a higher-fee version (Replace-By-Fee)
+    \item \textbf{Pegout consolidation}: Including additional pending pegouts in an updated transaction
+    \item \textbf{UTXO optimization}: Adjusting input selection for better transaction efficiency
+\end{itemize}
+
+The UTXO reuse property ensures that only one version of the proposal can eventually finalize on the Bitcoin blockchain. When the updated transaction confirms, the original proposal is automatically invalidated through the spent UTXO, preventing any possibility of double-execution. The Foundation Layer tracks both proposals until one achieves finality, at which point the competing version is removed from state.
+
+\subsubsection{Cancelling Proposal}
+\label{sec:pegout-proposal-cancellation}
+
+Circumstances may require canceling a pegout proposal without fulfilling its original pegouts. The Foundation Layer supports cancellation through the same UTXO reuse mechanism used for updates, with two primary approaches:
+
+\begin{itemize}
+    \item \textbf{Consolidation}: The federation submits a transaction that spends the proposal's UTXOs back to an address it controls, without including any pegout outputs. This effectively "consumes" the UTXOs while returning funds to the federation.
+
+    \item \textbf{Replacement}: The federation submits an entirely different proposal that reuses at least one UTXO from the original. When the replacement achieves finality, the original proposal is invalidated through the spent UTXO.
+\end{itemize}
+
+When the cancellation transaction achieves finality, the Foundation Layer automatically returns the original pegouts to the unassigned state, making them available for inclusion in future proposals. This recovery mechanism ensures that user withdrawal requests are never permanently lost due to proposal failures. They simply re-enter the queue for the next available federation to fulfill.
+
+\subsection{Foundation State Proof}
+\label{sec:foundation-state-proof}
+
+The Foundation Layer maintains a cryptographic proof of its complete state, enabling deterministic validation across all consensus participants. This state proof commits to four key components: context metadata, the commitment trie root, tracked Bitcoin headers, and auxiliary events that enable efficient state indexing and reconstruction.
+
+The commitment trie root $r_{\text{trie}}$ (section \ref{sec:foundation-state-proof-structure}) employs the Base-16 Modified Patricia Merkle Tree as implemented by Parity Technologies\footnote{\url{https://github.com/paritytech/trie}} to construct and validate state proofs. The architecture separates data storage from commitment construction: the trie operates exclusively on cryptographic hashes of key-value pairs, maintaining independence from the underlying database implementation.
+
+The system supports any key-value database backend (e.g., RocksDB, MDBX) that provides atomic commit and rollback mechanisms. These transactional guarantees must be supplied by the database layer and fall outside the scope of the trie commitment specification itself.
+
+\subsubsection{State Proof Structure}
+\label{sec:foundation-state-proof-structure}
+
+The complete Foundation state proof is represented as:
+
+\begin{equation}
+    \mathcal{F}^{\Phi} = (\text{context}, r_{\text{trie}}, \text{headers}, \text{events})
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $\text{context}$: Protocol context and version metadata (section \ref{sec:foundation-context-metadata})
+    \item $r_{\text{trie}}$: 32-byte commitment trie root as produced by the Tree implementation
+    \item $\text{headers}$: Set of tracked Bitcoin block hashes
+    \item $\text{events}$: Sequence of auxiliary events (section \ref{sec:foundation-aux-events}) for state reconstruction
+\end{itemize}
+
+\subsubsection{Context Metadata}
+\label{sec:foundation-context-metadata}
+
+The context provides version information and is primarily reserved for future protocol extensions:
+
+\begin{equation}
+    \text{context} = (\text{height})
+\end{equation}
+
+where $\text{height}$ is the current Botanix block height.
+
+\subsubsection{Auxiliary Events}
+\label{sec:foundation-aux-events}
+
+Auxiliary events provide an efficient event log enabling state reconstruction and indexing without reprocessing the entire commitment validation sequence.
+
+The following event types are recorded:
+
+\begin{itemize}
+    \item \textbf{Initiated Pegout}: Records a newly initiated pegout available for spending, including the pegout identifier and the list of candidate federations qualified to fulfill it.
+    \item \textbf{Submitted Proposal}: Records a newly submitted pegout proposal, capturing the complete proposal entry.
+    \item \textbf{New Bitcoin Header}: Records a Bitcoin block header being tracked by the Foundation Layer.
+    \item \textbf{Registered Bitcoin Transaction}: Records a Bitcoin transaction registration, associating a transaction with its containing block and the set of pegouts it fulfills.
+    \item \textbf{Finalized Bitcoin Header}: Records a finalized Bitcoin block along with the set of pegout identifiers that have reached finality.
+    \item \textbf{Orphaned Bitcoin Header}: Records an orphaned Bitcoin block along with the set of pegout identifiers that have been returned to unassigned (spendable) state.
+\end{itemize}
