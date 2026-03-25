@@ -90,10 +90,7 @@ impl CheckedBotanixHeader {
     ///
     /// - `AppHashMismatch` if the computed Botanix header hash doesn't match
     ///   the app hash committed in the Tendermint header
-    pub fn new_checked(
-        untrusted: BotanixHeader,
-        checked: &CheckedTendermintHeader,
-    ) -> Result<Self, Error> {
+    pub fn new(untrusted: BotanixHeader, checked: &CheckedTendermintHeader) -> Result<Self, Error> {
         let computed_hash: [u8; 32] = untrusted.hash_slow().into();
 
         let expected: [u8; 32] = checked
