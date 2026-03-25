@@ -41,7 +41,7 @@ use crate::{
     },
     validation::pegout::{PegoutId, PegoutWithId},
 };
-use bitcoin::{BlockHash, OutPoint, Txid};
+use bitcoin::{BlockHash, OutPoint, TxMerkleNode, Txid, hashes::Hash};
 use hash_db::HashDB;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -78,7 +78,9 @@ pub struct OnchainUtxoEntry {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OnchainHeaderEntry {
     pub block_hash: BlockHash,
-    pub bitcoin_height: u64,
+    pub parent_hash: BlockHash,
+    pub merkle_root: TxMerkleNode,
+    pub height: u64,
     pub proposals: Sorted<Txid>,
 }
 
@@ -316,7 +318,7 @@ impl ToCommit for ProposalEntry {
 
         txid.append_to_commit(t);
         fed_id.append_to_commit(t);
-        t.append_u64(b"botanix_height", *botanix_height);
+        t.append_u64(b"botanix:height", *botanix_height);
         utxos.append_to_commit(t);
         pegouts.append_to_commit(t);
     }
@@ -336,12 +338,19 @@ impl ToCommit for OnchainHeaderEntry {
         // Deconstruct so we do not miss anything accidentally.
         let OnchainHeaderEntry {
             block_hash,
-            bitcoin_height,
+            parent_hash,
+            merkle_root,
+            height,
             proposals,
         } = self;
 
         block_hash.append_to_commit(t);
-        t.append_u64(b"bitcoin_height", *bitcoin_height);
+        parent_hash.append_to_commit(t);
+        t.append_message(
+            b"bitcoin:merkle_root",
+            merkle_root.as_raw_hash().as_byte_array(),
+        );
+        t.append_u64(b"bitcoin:height", *height);
         proposals.append_to_commit(t);
     }
 }
@@ -546,15 +555,18 @@ where
 
         Ok(())
     }
-    // TODO: Should `bitcoin_height` be specifically validated?
     pub fn insert_bitcoin_header(
         &mut self,
-        block_hash: BlockHash,
-        bitcoin_height: u64,
+        header: bitcoin::block::Header,
+        height: u64,
     ) -> Result<(), PegoutError<<DB as DataSource>::Error>> {
+        let block_hash = header.block_hash();
+
         let entry = OnchainHeaderEntry {
             block_hash,
-            bitcoin_height,
+            parent_hash: header.prev_blockhash,
+            merkle_root: header.merkle_root,
+            height,
             proposals: vec![].into(),
         };
 
@@ -570,7 +582,7 @@ where
 
         Ok(())
     }
-    pub fn register_bitcoin_tx(
+    pub fn insert_bitcoin_tx(
         &mut self,
         block_hash: BlockHash,
         txid: Txid,
@@ -593,7 +605,9 @@ where
 
         let entry = OnchainHeaderEntry {
             block_hash,
-            bitcoin_height: header.v.bitcoin_height,
+            parent_hash: header.v.parent_hash,
+            merkle_root: header.v.merkle_root,
+            height: header.v.height,
             proposals: updated_proposals,
         };
 
