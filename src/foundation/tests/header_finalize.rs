@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_utils::gen_bitcoin_hash;
+use crate::test_utils::gen_bitcoin_header;
 
 #[test]
 fn finalize_header_valid() {
@@ -12,21 +12,21 @@ fn finalize_header_valid() {
         .apply(|mut db| db.insert_pegout_proposal(prop.clone(), None))
         .unwrap();
 
-    let block = gen_bitcoin_hash();
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), prop.txid))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.finalize_bitcoin_header(block))
+        .apply(|mut db| db.finalize_bitcoin_header(header.block_hash()))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block).unwrap();
+    let stored = atomic.db.get_header(&header.block_hash()).unwrap();
     assert!(stored.is_none());
 
     let stored = atomic.db.get_proposal(&prop.txid).unwrap();
@@ -64,23 +64,24 @@ fn finalize_header_with_competing_txid() {
         .apply(|mut db| db.insert_pegout_proposal(second_prop.clone(), None))
         .unwrap();
 
-    let block_1 = gen_bitcoin_hash();
-    let block_2 = gen_bitcoin_hash();
+    let header1 = gen_bitcoin_header();
+    let mut header2 = gen_bitcoin_header();
+    header2.prev_blockhash = header1.block_hash();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block_1, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header1, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block_2, 201))
+        .apply(|mut db| db.insert_bitcoin_header(header2, 201))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block_1, first_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header1.block_hash(), first_prop.txid))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block_2, second_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header2.block_hash(), second_prop.txid))
         .unwrap();
 
     assert_eq!(first_prop.utxos, second_prop.utxos);
@@ -104,7 +105,7 @@ fn finalize_header_with_competing_txid() {
     // # Finalize block-1
 
     atomic
-        .apply(|mut db| db.finalize_bitcoin_header(block_1))
+        .apply(|mut db| db.finalize_bitcoin_header(header1.block_hash()))
         .unwrap();
 
     // ## State: First proposal
@@ -167,7 +168,7 @@ fn finalize_header_with_competing_txid() {
 
     // ## State: Block-1 was finalized
 
-    let stored = atomic.db.get_header(&block_1).unwrap();
+    let stored = atomic.db.get_header(&header1.block_hash()).unwrap();
     assert!(stored.is_none());
 
     // ## State: Block-2 remains
@@ -181,16 +182,20 @@ fn finalize_header_with_competing_txid() {
     //
     // TODO: Should this be cleaned up, though? Currently proposals do not
     // reference the block hash they're included in.
-    let stored = atomic.db.get_header(&block_2).unwrap().unwrap();
+    let stored = atomic
+        .db
+        .get_header(&header2.block_hash())
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.v.proposals, vec![second_prop.txid].into());
 
     // # Orphan block-2
 
     atomic
-        .apply(|mut db| db.orphan_bitcoin_header(block_2))
+        .apply(|mut db| db.orphan_bitcoin_header(header2.block_hash()))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block_2).unwrap();
+    let stored = atomic.db.get_header(&header2.block_hash()).unwrap();
     assert!(stored.is_none());
 }
 
@@ -205,21 +210,21 @@ fn orphan_header() {
         .apply(|mut db| db.insert_pegout_proposal(prop.clone(), None))
         .unwrap();
 
-    let block = gen_bitcoin_hash();
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), prop.txid))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.orphan_bitcoin_header(block))
+        .apply(|mut db| db.orphan_bitcoin_header(header.block_hash()))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block).unwrap();
+    let stored = atomic.db.get_header(&header.block_hash()).unwrap();
     assert!(stored.is_none());
 
     // Importantly, the orphaned proposal MUST REMAIN in the state, since it

@@ -61,7 +61,7 @@ impl InMemoryAtomicLayer {
         atomic.commit().unwrap();
         atomic
     }
-    /// Convenience method for automatically starting a database transactiona
+    /// Convenience method for automatically starting a database transactions
     /// and commiting the result on success or rollback on error.
     pub fn apply<F, T, E>(&mut self, f: F) -> Result<T, E>
     where

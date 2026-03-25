@@ -1,5 +1,5 @@
 use super::*;
-use crate::{foundation::component::pegout::ValidationError, test_utils::gen_bitcoin_hash};
+use crate::{foundation::component::pegout::ValidationError, test_utils::gen_bitcoin_header};
 
 #[test]
 fn register_transaction_valid() {
@@ -12,17 +12,17 @@ fn register_transaction_valid() {
         .apply(|mut db| db.insert_pegout_proposal(prop.clone(), None))
         .unwrap();
 
-    let block = gen_bitcoin_hash();
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), prop.txid))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block).unwrap().unwrap();
+    let stored = atomic.db.get_header(&header.block_hash()).unwrap().unwrap();
     assert_eq!(stored.v.proposals, vec![prop.txid].into());
 
     for utxo in &prop.utxos {
@@ -42,18 +42,18 @@ fn register_transaction_txid_already_inserted() {
         .apply(|mut db| db.insert_pegout_proposal(prop.clone(), None))
         .unwrap();
 
-    let block = gen_bitcoin_hash();
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), prop.txid))
         .unwrap();
 
     let err = atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), prop.txid))
         .unwrap_err();
 
     assert_eq!(err, ValidationError::TxidAlreadyInserted.into());
@@ -65,14 +65,15 @@ fn register_transaction_proposal_does_not_exist() {
 
     let botanix_height = 100;
     let prop = atomic.gen_new_proposal(ALICE, botanix_height);
-    let block = gen_bitcoin_hash();
+
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     let err = atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), prop.txid))
         .unwrap_err();
 
     assert_eq!(err, ValidationError::ProposalDoesNotExist.into());
@@ -99,17 +100,17 @@ fn register_transaction_multiple_proposals_good_utxo_reuse() {
         .apply(|mut db| db.insert_pegout_proposal(second_prop.clone(), None))
         .unwrap();
 
-    let block = gen_bitcoin_hash();
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, first_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), first_prop.txid))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block).unwrap().unwrap();
+    let stored = atomic.db.get_header(&header.block_hash()).unwrap().unwrap();
     assert_eq!(stored.v.proposals, vec![first_prop.txid].into());
 
     for utxo in &first_prop.utxos {
@@ -118,10 +119,10 @@ fn register_transaction_multiple_proposals_good_utxo_reuse() {
     }
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, second_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), second_prop.txid))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block).unwrap().unwrap();
+    let stored = atomic.db.get_header(&header.block_hash()).unwrap().unwrap();
     assert_eq!(
         stored.v.proposals,
         vec![first_prop.txid, second_prop.txid].into()
@@ -155,21 +156,21 @@ fn register_transaction_multiple_proposals_unique_utxos() {
         .apply(|mut db| db.insert_pegout_proposal(second_prop.clone(), None))
         .unwrap();
 
-    let block = gen_bitcoin_hash();
+    let header = gen_bitcoin_header();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, first_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), first_prop.txid))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block, second_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header.block_hash(), second_prop.txid))
         .unwrap();
 
-    let stored = atomic.db.get_header(&block).unwrap().unwrap();
+    let stored = atomic.db.get_header(&header.block_hash()).unwrap().unwrap();
     assert_eq!(
         stored.v.proposals,
         vec![first_prop.txid, second_prop.txid].into()
@@ -205,35 +206,44 @@ fn register_transaction_upgraded_proposal_good_utxo_reuse() {
         .apply(|mut db| db.insert_pegout_proposal(upgraded_prop.clone(), Some(prev_prop.txid)))
         .unwrap();
 
-    let block_1 = gen_bitcoin_hash();
-    let block_2 = gen_bitcoin_hash();
+    let header1 = gen_bitcoin_header();
+    let mut header2 = gen_bitcoin_header();
+    header2.prev_blockhash = header1.block_hash();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block_1, 200))
+        .apply(|mut db| db.insert_bitcoin_header(header1, 200))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.insert_bitcoin_header(block_2, 201))
+        .apply(|mut db| db.insert_bitcoin_header(header2, 201))
         .unwrap();
 
     atomic
-        .apply(|mut db| db.register_bitcoin_tx(block_1, prev_prop.txid))
+        .apply(|mut db| db.insert_bitcoin_tx(header1.block_hash(), prev_prop.txid))
         .unwrap();
 
     atomic
         .apply(|mut db| {
-            db.register_bitcoin_tx(
+            db.insert_bitcoin_tx(
                 // NOTE: Different blocks!
-                block_2,
+                header2.block_hash(),
                 upgraded_prop.txid,
             )
         })
         .unwrap();
 
-    let stored = atomic.db.get_header(&block_1).unwrap().unwrap();
+    let stored = atomic
+        .db
+        .get_header(&header1.block_hash())
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.v.proposals, vec![prev_prop.txid].into());
 
-    let stored = atomic.db.get_header(&block_2).unwrap().unwrap();
+    let stored = atomic
+        .db
+        .get_header(&header2.block_hash())
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.v.proposals, vec![upgraded_prop.txid].into());
 
     let utxo_reuse = prev_prop.utxos.get(0).unwrap();
