@@ -56,7 +56,7 @@ use crate::{
         pegout::{PegoutId, PegoutWithId},
     },
 };
-use bitcoin::{merkle_tree::PartialMerkleTree, BlockHash, Transaction, Txid};
+use bitcoin::{BlockHash, Transaction, Txid, merkle_tree::PartialMerkleTree};
 use hash_db::HashDB;
 use std::collections::{HashSet, VecDeque};
 use trie_db::DBValue;
@@ -73,7 +73,9 @@ pub mod proof;
 pub use commitment::atomic::{AtomicError, AtomicErrorVariant, AtomicLayer};
 pub use commitment::sorted::Sorted;
 pub use commitment::trie::{CommitmentStateRoot, TrieLayer};
+pub use commitment::{AliasFatDBMut, AliasMemoryDB};
 pub use commitment::{CommitHasher, MultisigId};
+pub use component::Checked;
 pub use component::pegout::{
     DataSource,
     // TODO: Those `E*` types should be named differently, probably.
@@ -88,7 +90,6 @@ pub use component::pegout::{
     ProposalEntry,
     UnassignedEntry,
 };
-pub use component::Checked;
 pub use component::{BotanixLayer, BotanixLayerError, DatabaseError};
 
 // TODO: Expose those in crate root, maybe?
@@ -987,7 +988,7 @@ where
 
         // TODO: Match Txid against the actual `proposal`. While we do check the
         // UTXOs and pegouts individually, this should be done anyway.
-        let computed_txid = tx.compute_txid();
+        let _computed_txid = tx.compute_txid();
 
         // Convert input lists to `VecDeque` since it's easier to work with.
         let mut queue_tx_in: VecDeque<bitcoin::TxIn> = tx.input.to_vec().into();
@@ -1038,7 +1039,7 @@ where
         }
 
         // VALIDATE: Optional change address.
-        if let Some(change) = queue_tx_out.pop_front() {
+        if let Some(_change) = queue_tx_out.pop_front() {
             // TODO: Validate change - right now we always return an error.
             return Err(ValidationError::TxOutReturnBadChange)?;
         }

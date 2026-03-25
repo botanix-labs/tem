@@ -353,7 +353,7 @@ impl Decodable for ReceiptWithBloom {
 }
 
 impl TransactionSigned {
-    pub fn encode_inner(&self, out: &mut dyn BufMut, with_header: bool) {
+    pub fn encode_inner(&self, _out: &mut dyn BufMut, _with_header: bool) {
         todo!()
     }
 }

@@ -238,8 +238,8 @@ impl CheckedTendermintChain {
     ///
     /// A new `CheckedTendermintChain` or an error if validation fails.
     pub fn new_via_bitcoin(
-        untrusted: SignedHeader,
-        checked: &CheckedBitcoinHeader,
+        _untrusted: SignedHeader,
+        _checked: &CheckedBitcoinHeader,
     ) -> Result<Self, ()> {
         todo!()
     }
