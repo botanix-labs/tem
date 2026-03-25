@@ -43,18 +43,20 @@
 //! - Preparation for future dynamic federation upgrades
 //!
 //! <img src="data:image/png;base64,
-#![doc = include_str!("../../docs/assets/foundation_overview.base64")]
+#![doc = include_str!("../../assets/foundation_overview.base64")]
 //! " alt="Validation Workflow Diagram" style="max-width: 100%; width: 1000px; height: auto; display: block; margin: 0 auto;">
 use crate::{
     foundation::{
-        commitment::{sorted::Sorted, trie},
-        component::{BotanixLayer, BotanixLayerError, DatabaseError, pegout::PegoutError},
+        commitment::trie,
         proof::{AuxEvent, Context, FoundationStateProof, FoundationStateRoot},
     },
-    structs::block_tree::{BlockFate, BlockTree},
-    validation::pegout::{PegoutId, PegoutWithId},
+    structs::block_tree::{BlockFate, BlockTree, Error as BlockTreeError},
+    validation::{
+        bitcoin::verify_transaction_proof,
+        pegout::{PegoutId, PegoutWithId},
+    },
 };
-use bitcoin::{BlockHash, TxOut, Txid};
+use bitcoin::{merkle_tree::PartialMerkleTree, BlockHash, Transaction, Txid};
 use hash_db::HashDB;
 use std::collections::{HashSet, VecDeque};
 use trie_db::DBValue;
@@ -69,11 +71,25 @@ pub mod proof;
 
 // Public re-exports.
 pub use commitment::atomic::{AtomicError, AtomicErrorVariant, AtomicLayer};
+pub use commitment::sorted::Sorted;
 pub use commitment::trie::{CommitmentStateRoot, TrieLayer};
 pub use commitment::{CommitHasher, MultisigId};
 pub use component::pegout::{
-    DataSource, OnchainHeaderEntry, OnchainUtxoEntry, ProposalEntry, UnassignedEntry,
+    DataSource,
+    // TODO: Those `E*` types should be named differently, probably.
+    EOnchainHeader,
+    EOnchainUtxo,
+    EProposal,
+    EUnassigned,
+    //
+    OnchainHeaderEntry,
+    OnchainUtxoEntry,
+    PegoutError,
+    ProposalEntry,
+    UnassignedEntry,
 };
+pub use component::Checked;
+pub use component::{BotanixLayer, BotanixLayerError, DatabaseError};
 
 // TODO: Expose those in crate root, maybe?
 pub use bitcoin;
@@ -138,10 +154,14 @@ impl<A, DS> From<DatabaseError<DS>> for Error<A, DS> {
 pub enum ValidationError {
     BadFoundationStateRoot,
     BadBitcoinHeader,
+    BadAncestorMark,
+    BadTxInclusionProof,
     EmptyPegoutList,
+    UtxoNotMatchProposal,
     TxOutValueExceedsPegoutAmount,
     TxOutDestNotMatchingPegoutDest,
     PegoutIdReused,
+    TxInputsRemainingUnchecked,
     TxOutReturnBadChange,
     TxOutputsRemainingUnchecked,
     PegoutListRemainingUnchecked,
@@ -165,12 +185,20 @@ impl From<component::pegout::ValidationError> for ValidationError {
 pub enum BackendError<A, DS> {
     /// Error in the atomic layer.
     AtomicLayer(AtomicError<A>),
+    /// Error in the database layer.
     Database(DatabaseError<DS>),
+    /// The block tree fork detection mechanism was incorrectly setup.
+    BadBlockTree(BlockTreeError),
+    /// The preloaded Bitcoin headers for initiation must not be empty. A
+    /// genesis Foundation state should be initiated with
+    /// [`Foundation::new_genesis`] instead.
+    EmptyBitcoinHeaders,
     /// The computed root after an atomic operation (commit/rollback) on the
     /// commitment layer did not match some expected value.
     ///
     /// This generally implies a software bug.
     BadPostAtomicRoot,
+    InvalidBlockMarking,
     /// Fatal error in the commitment layer.
     ///
     /// This generally implies corrupted database.
@@ -186,6 +214,12 @@ impl<A, DS> From<AtomicError<A>> for BackendError<A, DS> {
 impl<A, DS> From<DatabaseError<DS>> for BackendError<A, DS> {
     fn from(err: DatabaseError<DS>) -> Self {
         BackendError::Database(err)
+    }
+}
+
+impl<A, DS> From<BlockTreeError> for BackendError<A, DS> {
+    fn from(err: BlockTreeError) -> Self {
+        BackendError::BadBlockTree(err)
     }
 }
 
@@ -245,7 +279,7 @@ impl<A, DS> From<component::BackendError<DS>> for BackendError<A, DS> {
 /// ```rust,ignore
 /// // Proposal phase - validate and compute new state root
 /// let proof = foundation.propose_commitments(|pending| {
-///     pending.insert_bitcoin_header_unchecked(block_hash, parent_hash)?;
+///     pending.insert_bitcoin_header(block_hash, parent_hash)?;
 ///     pending.insert_bitcoin_tx_unchecked(hash, tx, pegouts)?;
 ///     Ok(())
 /// })?;
@@ -256,7 +290,7 @@ impl<A, DS> From<component::BackendError<DS>> for BackendError<A, DS> {
 /// // Finalization phase - verify and persist changes  
 /// foundation.finalize_commitments(state_root, |pending| {
 ///     // Identical operations as proposal phase
-///     pending.insert_bitcoin_header_unchecked(block_hash, parent_hash)?;
+///     pending.insert_bitcoin_header(block_hash, parent_hash)?;
 ///     pending.insert_bitcoin_tx_unchecked(hash, tx, pegouts)?;
 ///     Ok(())
 /// })?;
@@ -273,6 +307,7 @@ pub struct Foundation<A, DB> {
     atomic_layer: A,
     block_tree: BlockTree,
     height: u64,
+    markings: HashSet<BlockHash>,
     _p: std::marker::PhantomData<DB>,
 }
 
@@ -283,34 +318,123 @@ where
 {
     /// Creates a new Foundation instance with the specified data layer,
     /// commitment layer, and initial Bitcoin block.
-    //
-    // TODO: There must be a way to preload the `BlockTree` from the local
-    // database.
-    //
-    // TODO: Be more distinct with "DataLayer" and "DataSource", it's kind of
-    // confusing; rename!
-    pub fn new(
+    pub fn new_genesis(
         mut atomic_layer: A,
-        bitcoin_hash: BlockHash,
+        header: bitcoin::block::Header,
         bitcoin_height: u64,
         botanix_height: u64,
+        conf_depth: u64,
     ) -> Result<Self, Error<A::BackendError, <DB as DataSource>::Error>> {
-        // Commit the initial block hash.
-        {
-            let mut btx = atomic_layer.start_tx()?;
+        let mut tx = atomic_layer.start_tx()?;
+        let block_hash = header.block_hash();
 
-            btx.insert_bitcoin_header(bitcoin_hash, bitcoin_height)?;
-            std::mem::drop(btx);
+        // VALIDATE: The passed-on block header does NOT exist in the commitment
+        // state yet.
+        tx.insert_bitcoin_header(header, bitcoin_height)?;
 
-            atomic_layer.commit()?;
-        }
+        let block_tree = BlockTree::new(block_hash, conf_depth).map_err(BackendError::from)?;
+
+        // COMMIT changes to the database.
+        atomic_layer.commit()?;
 
         Ok(Foundation {
             atomic_layer,
-            block_tree: BlockTree::new(bitcoin_hash, 3).unwrap(), // TODO
+            block_tree,
             height: botanix_height,
+            markings: HashSet::new(),
             _p: std::marker::PhantomData,
         })
+    }
+    pub fn new(
+        mut atomic_layer: A,
+        bitcoin_headers: &[BlockHash],
+        botanix_height: u64,
+        conf_depth: u64,
+    ) -> Result<Self, Error<A::BackendError, <DB as DataSource>::Error>> {
+        if bitcoin_headers.is_empty() {
+            return Err(BackendError::EmptyBitcoinHeaders)?;
+        }
+
+        let mut tx = atomic_layer.start_tx()?;
+
+        // VALIDATE: All passed-on Bitcoin headers exist in the commitment state.
+        let mut checked_headers: VecDeque<Checked<EOnchainHeader>> = bitcoin_headers
+            .iter()
+            .map(|h| tx.get_checked(|db| db.get_header(h)))
+            .collect::<Result<VecDeque<_>, _>>()?;
+
+        // Init the block tree with the extracted elder.
+        let elder = checked_headers
+            .pop_front()
+            .expect("elder must exist")
+            .consume()
+            .v
+            .block_hash;
+
+        let mut block_tree = BlockTree::new(elder, conf_depth).map_err(BackendError::from)?;
+
+        // Preload the block tree with all checked Bitcoin headers.
+        while let Some(header) = checked_headers.pop_front() {
+            let h = header.consume();
+
+            block_tree
+                .insert(h.v.block_hash, h.v.parent_hash)
+                .map_err(BackendError::from)?;
+        }
+
+        // Nothing to commit.
+        atomic_layer.rollback()?;
+
+        Ok(Foundation {
+            atomic_layer,
+            block_tree,
+            height: botanix_height,
+            markings: HashSet::new(),
+            _p: std::marker::PhantomData,
+        })
+    }
+    // TODO: Provide more context for this.
+    /// Marks a Bitcoin block header for special tracking.
+    ///
+    /// # Arguments
+    /// * `hash` - The block hash to mark
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Block was successfully marked (newly added to markings)
+    /// * `Ok(false)` - Block was already marked
+    /// * `Err` - Block hash not found in the block tree
+    ///
+    /// # Errors
+    /// Returns `BackendError::InvalidBlockMarking` if the block hash is not
+    /// present in the block tree.
+    pub fn mark_bitcoin_header(
+        &mut self,
+        hash: BlockHash,
+    ) -> Result<bool, Error<A::BackendError, <DB as DataSource>::Error>> {
+        if !self.block_tree.contains(&hash) {
+            return Err(BackendError::InvalidBlockMarking)?;
+        }
+
+        Ok(self.markings.insert(hash))
+    }
+    /// Returns all tracked block hashes currently in the block tree.
+    pub fn tracked_blocks(&self) -> Vec<BlockHash> {
+        self.block_tree.blocks()
+    }
+    /// Returns the tracked set of chain tips in the block tree.
+    ///
+    /// Tips are blocks that have no children and represent the current
+    /// frontier of the block tree. Multiple tips indicate active forks.
+    pub fn tracked_block_tips(&self) -> Vec<BlockHash> {
+        self.block_tree.tips()
+    }
+    /// Returns the tracked elder (oldest retained) block hash in the block
+    /// tree.
+    ///
+    /// The elder is the oldest block still maintained in the tree structure.
+    /// All blocks older than the elder have been pruned as finalized.
+    pub fn tracked_block_elder(&self) -> BlockHash {
+        self.block_tree.elder()
     }
     pub fn commitment_root(
         &mut self,
@@ -360,6 +484,7 @@ where
             // enough (~18 entries) such that a full copy is considered
             // inexpensive.
             block_tree: self.block_tree.clone(),
+            markings: &self.markings,
             aux_msgs: Vec::new(),
             _p: std::marker::PhantomData,
         };
@@ -377,7 +502,7 @@ where
 
         // Essentially a sanity check.
         if origin_root != reset_root {
-            return Err(BackendError::BadPostAtomicRoot.into());
+            return Err(BackendError::BadPostAtomicRoot)?;
         }
 
         // If the inner logic of the closure failed, we return the error
@@ -438,6 +563,7 @@ where
             // enough (~18 entries) such that a full copy is considered
             // inexpensive.
             block_tree: self.block_tree.clone(),
+            markings: &self.markings,
             aux_msgs: Vec::new(),
             _p: std::marker::PhantomData,
         };
@@ -457,7 +583,7 @@ where
 
                 // Essentially a sanity check.
                 if reset_root != origin_root {
-                    return Err(BackendError::BadPostAtomicRoot.into());
+                    return Err(BackendError::BadPostAtomicRoot)?;
                 }
 
                 // Discard updated block tree.
@@ -478,7 +604,7 @@ where
 
             // Essentially a sanity check.
             if updated_root != foundation_state.commitments {
-                return Err(BackendError::BadPostAtomicRoot.into());
+                return Err(BackendError::BadPostAtomicRoot)?;
             }
 
             // Increment height.
@@ -493,6 +619,25 @@ where
             // Commit the updated block tree.
             self.block_tree = block_tree;
 
+            // Update markings; cleanup any pruned blocks.
+            for aux in &foundation_state.aux_events {
+                match aux {
+                    AuxEvent::FinalizedBitcoinHeader {
+                        block_hash,
+                        finalized: _,
+                    } => {
+                        self.markings.remove(block_hash);
+                    }
+                    AuxEvent::OrphanedBitcoinHeader {
+                        block_hash,
+                        delayed: _,
+                    } => {
+                        self.markings.remove(block_hash);
+                    }
+                    _ => {}
+                }
+            }
+
             Ok(CheckedFoundationProof {
                 _foundation_state: foundation_state,
                 _extra_val: extra_val,
@@ -503,13 +648,13 @@ where
 
             // Essentially a sanity check.
             if reset_root != origin_root {
-                return Err(BackendError::BadPostAtomicRoot.into());
+                return Err(BackendError::BadPostAtomicRoot)?;
             }
 
             // Discard updated block tree.
             std::mem::drop(block_tree);
 
-            Err(ValidationError::BadFoundationStateRoot.into())
+            Err(ValidationError::BadFoundationStateRoot)?
         }
     }
 }
@@ -547,17 +692,18 @@ impl<T> CheckedFoundationProof<T> {
     pub fn compute_root(&self) -> FoundationStateRoot {
         self.state().compute_root()
     }
-
     /// Returns a reference to the validated foundation state.
     pub fn state(&self) -> &FoundationStateProof {
         &self._foundation_state
     }
-
+    /// Consumes the proof and returns the foundation state proof.
+    pub fn into_state(self) -> FoundationStateProof {
+        self._foundation_state
+    }
     /// Returns a reference to the extra data associated with this proof.
     pub fn extra_val(&self) -> &T {
         &self._extra_val
     }
-
     /// Consumes the proof and returns the extra data.
     pub fn into_extra_val(self) -> T {
         self._extra_val
@@ -591,6 +737,7 @@ impl<T> CheckedFoundationProof<T> {
 pub struct CommitmentsDraft<'db, A, DB> {
     btx: BotanixLayer<'db, DB>,
     block_tree: BlockTree,
+    markings: &'db HashSet<BlockHash>,
     aux_msgs: Vec<AuxEvent>,
     _p: std::marker::PhantomData<A>,
 }
@@ -630,6 +777,7 @@ where
         let pegout_id = pegout.id;
         let candidates: Sorted<_> = candidates.into();
 
+        // COMMIT: Insert unassigned pegout into the commitment layer.
         self.btx.insert_unassigned(pegout, candidates.clone())?;
 
         self.aux_msgs.push(AuxEvent::InitiatedPegout {
@@ -644,6 +792,7 @@ where
         proposal: ProposalEntry,
         prev_proposal: Option<Txid>,
     ) -> Result<(), Error<A::BackendError, <DB as DataSource>::Error>> {
+        // COMMIT: Insert pegout proposal into the commitment layer.
         self.btx
             .insert_pegout_proposal(proposal.clone(), prev_proposal)?;
 
@@ -677,19 +826,48 @@ where
     /// - Data layer queries fail
     /// - Commitment layer validation fails
     //
-    // TODO: Add a variant that mandates a `CheckedBitcoinHeader`.
-    pub fn insert_bitcoin_header_unchecked(
+    // TODO: Update docs to describe the header marking mechanism.
+    // TODO: The height should be verified against the parent height. Right now,
+    // the block tree only tracks relative heights, not absolute heights.
+    pub fn insert_bitcoin_header(
         &mut self,
-        block_hash: BlockHash,
-        parent_hash: BlockHash,
+        header: bitcoin::block::Header,
         height: u64,
     ) -> Result<(), Error<A::BackendError, <DB as DataSource>::Error>> {
-        // VALIDATE: Block header is newly inserted.
-        self.btx.insert_bitcoin_header(block_hash, height)?;
+        let block_hash = header.block_hash();
+        let parent_hash = header.prev_blockhash;
+
+        // COMMIT: Insert bitcoin header into the commitment layer.
+        self.btx.insert_bitcoin_header(header, height)?;
 
         self.aux_msgs.push(AuxEvent::NewBitcoinHeader {
             block_hash: block_hash.into(),
         });
+
+        // VALIDATE: Block header ancestor has been subjectively marked. This
+        // ensures the chain doesn't progress beyond the thresh without at least
+        // one subjectively validated ancestor (prevents building on potentially
+        // invalid forks).
+        let chain = self
+            .block_tree
+            .chain(&parent_hash)
+            .map_err(|_| ValidationError::BadBitcoinHeader)?;
+
+        let thresh = self.block_tree.conf_depth().div_ceil(3).max(1);
+
+        // Traverse backwards, from the parent to the elder.
+        for (idx, ancestor) in chain.iter().rev().enumerate() {
+            if self.markings.contains(ancestor) {
+                // Found a marked ancestor within threshold, validation passes
+                break;
+            }
+
+            if idx as u64 >= thresh {
+                // No marked ancestors found within acceptable depth, reject
+                // block
+                return Err(ValidationError::BadAncestorMark)?;
+            }
+        }
 
         // Insert the new Bitcoin header and retrieve any resulting prune events.
         let pruned = self
@@ -784,34 +962,64 @@ where
     /// - Pegout ID is duplicated in the request
     /// - Transaction ID is already registered for this block
     /// - Data layer queries fail
-    //
-    // TODO: Add a variant that mandates a `CheckedBitcoinTransaction`.
-    pub fn insert_bitcoin_tx_unchecked(
+    // TODO: UTXO's are not checked against the proposal UTXOs. This SHOULD be checked!
+    pub fn insert_bitcoin_tx(
         &mut self,
         block_hash: BlockHash,
-        tx: bitcoin::Transaction,
+        tx: Transaction,
+        proof: PartialMerkleTree,
         proposal: ProposalEntry,
     ) -> Result<(), Error<A::BackendError, <DB as DataSource>::Error>> {
+        // COMMIT: Insert Bitcoin transaction into the commitment layer.
+        self.btx.insert_bitcoin_tx(block_hash, proposal.txid)?;
+
         // VALIDATE: Pegout list must not be empty.
         if proposal.pegouts.is_empty() {
-            return Err(ValidationError::EmptyPegoutList.into());
+            return Err(ValidationError::EmptyPegoutList)?;
         }
 
-        // TODO: Match actual proposal.
+        // VALIDATE: The passed-on block hash exists.
+        let header = self.btx.get_checked(|db| db.get_header(&block_hash))?;
+
+        // VALIDATE: The passed-on transaction has a valid block inclusion proof.
+        verify_transaction_proof(&tx, &proof, &header.v.merkle_root)
+            .map_err(|_| ValidationError::BadTxInclusionProof)?;
+
+        // TODO: Match Txid against the actual `proposal`. While we do check the
+        // UTXOs and pegouts individually, this should be done anyway.
         let computed_txid = tx.compute_txid();
+
+        // Convert input lists to `VecDeque` since it's easier to work with.
+        let mut queue_tx_in: VecDeque<bitcoin::TxIn> = tx.input.to_vec().into();
+        let mut queue_utxos: VecDeque<bitcoin::OutPoint> = proposal.utxos.to_vec().into();
+
+        // VALIDATE: Each input in the transaction must match the proposed UTXO
+        // in the proposal.
+        while let Some((tx_in, utxo)) = queue_tx_in.pop_front().zip(queue_utxos.pop_front()) {
+            if tx_in.previous_output != utxo {
+                return Err(ValidationError::UtxoNotMatchProposal)?;
+            }
+        }
+
+        // VALIDATE: All Bitcoin transaction inputs have been processed.
+        if !queue_tx_in.is_empty() || !queue_utxos.is_empty() {
+            return Err(ValidationError::TxInputsRemainingUnchecked)?;
+        }
 
         // Used for PegoutId duplicate checking.
         let mut used_ids = HashSet::new();
 
-        // Convert lists to VecDeque since it's easier to work with.
-        let mut queue_tx_out: VecDeque<TxOut> = VecDeque::from(tx.output.clone());
+        // Convert output lists to `VecDeque` since it's easier to work with.
+        let mut queue_tx_out: VecDeque<bitcoin::TxOut> = VecDeque::from(tx.output.clone());
         let mut queue_pegouts: VecDeque<PegoutWithId> = VecDeque::from(proposal.pegouts.to_vec());
 
+        // VALIDATE: Each output in the transaction must match the proposed
+        // pegout in the proposal.
         while let Some((tx_out, pegout)) = queue_tx_out.pop_front().zip(queue_pegouts.pop_front()) {
             // VALIDATE: Output value must be equal or less (fee-adjustment)
             // then the pegout amount.
             if pegout.data.amount < tx_out.value {
-                return Err(ValidationError::TxOutValueExceedsPegoutAmount.into());
+                return Err(ValidationError::TxOutValueExceedsPegoutAmount)?;
             }
 
             // VALIDATE: Output scriptPubkey matches the pegout destination.
@@ -820,47 +1028,46 @@ where
                 .destination
                 .matches_script_pubkey(&tx_out.script_pubkey)
             {
-                return Err(ValidationError::TxOutDestNotMatchingPegoutDest.into());
+                return Err(ValidationError::TxOutDestNotMatchingPegoutDest)?;
             }
 
             // VALIDATE: PegoutId may not be reused.
             if !used_ids.insert(pegout.id) {
-                return Err(ValidationError::PegoutIdReused.into());
+                return Err(ValidationError::PegoutIdReused)?;
             }
         }
 
         // VALIDATE: Optional change address.
         if let Some(change) = queue_tx_out.pop_front() {
             // TODO: Validate change - right now we always return an error.
-            return Err(ValidationError::TxOutReturnBadChange.into());
+            return Err(ValidationError::TxOutReturnBadChange)?;
         }
 
         // VALIDATE: All Bitcoin transaction outputs have been processed.
         if !queue_tx_out.is_empty() {
-            // Transaction contains more fields
-            return Err(ValidationError::TxOutputsRemainingUnchecked.into());
+            // Transaction contains more outputs.
+            return Err(ValidationError::TxOutputsRemainingUnchecked)?;
         }
 
         // VALIDATE: All passed-on pegouts have been processed.
         if !queue_pegouts.is_empty() {
-            return Err(ValidationError::PegoutListRemainingUnchecked.into());
+            return Err(ValidationError::PegoutListRemainingUnchecked)?;
         }
-
-        debug_assert!(queue_pegouts.is_empty());
-        debug_assert!(queue_tx_out.is_empty());
 
         let aux_pegouts: Sorted<PegoutId> =
             proposal.pegouts.iter().map(|pegout| pegout.id).collect();
 
         self.aux_msgs.push(AuxEvent::RegisterBitcoinTx {
-            block_hash: block_hash.into(),
+            block_hash,
             txid: proposal.txid,
             pegouts: aux_pegouts,
         });
 
-        // COMMIT: Register Bitcoin transaction with the commitment layer.
-        // TODO: Maybe do this at the start?
-        self.btx.register_bitcoin_tx(block_hash, proposal.txid)?;
+        debug_assert!(queue_utxos.is_empty());
+        debug_assert!(queue_tx_in.is_empty());
+
+        debug_assert!(queue_pegouts.is_empty());
+        debug_assert!(queue_tx_out.is_empty());
 
         Ok(())
     }
