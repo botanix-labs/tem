@@ -178,7 +178,7 @@ impl CheckedPegoutWithId {
     /// - `InvalidReceiptLogIdx` if the log index is out of bounds
     /// - `BadTransactionProof` or `BadReceiptProof` for cryptographic validation failures
     /// - `PegoutError` variants for pegout data extraction or validation failures
-    pub fn new_checked(
+    pub fn new(
         // TODO: Maybe just pass on `Transaction` directly?
         untrusted_tx: TransactionSigned,
         untrusted_receipt: Receipt,
