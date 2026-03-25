@@ -249,14 +249,14 @@ pub fn verify_proof<T: AsRef<[u8]>>(
 ///
 /// ## Construction process
 ///
-/// 1. Start at root with full range [A,B,C,D], target index 1
-/// 2. Split at point 2: left=[A,B], right=[C,D]
+/// 1. Start at root with full range \[A,B,C,D\], target index 1
+/// 2. Split at point 2: left=\[A,B\], right=\[C,D\]
 /// 3. Index 1 < 2, so go left. Collect Hash2 as aunt
-/// 4. Now in left subtree [A,B], target index 1
-/// 5. Split at point 1: left=[A], right=[B]
+/// 4. Now in left subtree \[A,B\], target index 1
+/// 5. Split at point 1: left=\[A\], right=\[B\]
 /// 6. Index 1 >= 1, so go right. Collect A as aunt
 /// 7. Reached target leaf B
-/// 8. Final aunts = [Hash2, A]
+/// 8. Final aunts = \[Hash2, A\]
 fn collect_aunts<T: AsRef<[u8]>>(items: &[T], target_index: usize, aunts: &mut Vec<[u8; 32]>) {
     if items.len() <= 1 {
         // Base case: we've reached the target leaf
