@@ -38,14 +38,14 @@
 //! - Prevents premature finalization of blocks that might still be reorganized
 
 use bitcoin::{BlockHash, hashes::Hash};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Errors that can occur during block tree operations.
 ///
 /// These errors represent various validation failures when building and
 /// maintaining a block tree structure for tracking Bitcoin block relationships
 /// and pruning.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
     /// The confirmation depth is too low for secure operation.
@@ -102,7 +102,7 @@ impl BlockFate {
 /// efficient traversal and pruning operations.
 #[derive(Debug, Clone)]
 struct BlockNode {
-    /// Relative height of this block from the tree's root.
+    /// Relative height of this block.
     rheight: u64,
     /// Hash of the parent block.
     parent: BlockHash,
@@ -188,12 +188,16 @@ impl BlockTree {
             conf_depth,
         })
     }
+    /// Returns the required confirmation depth for finality.
+    pub fn conf_depth(&self) -> u64 {
+        self.conf_depth
+    }
     /// Returns the current set of chain tips.
     ///
     /// Tips are blocks that have no children and represent the current
     /// frontier of the block tree. Multiple tips indicate active forks.
-    pub fn tips(&self) -> &HashSet<BlockHash> {
-        &self.tips
+    pub fn tips(&self) -> Vec<BlockHash> {
+        self.tips.iter().copied().collect()
     }
     /// Returns the elder (oldest retained) block hash.
     ///
@@ -203,9 +207,44 @@ impl BlockTree {
         self.elder
     }
     /// Returns all block hashes currently in the tree.
-    // TODO: Should be a list of references, avoid copying if possible.
     pub fn blocks(&self) -> Vec<BlockHash> {
         self.blocks.keys().copied().collect()
+    }
+    /// Returns the chain of block hashes from the elder to the given block
+    /// hash.
+    ///
+    /// This method traverses the block tree backwards from the specified block
+    /// hash to the elder, collecting all block hashes along the path.
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The block hash to start the chain from
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<BlockHash>)` - A vector of block hashes where the first
+    ///   element is the elder and the last element is the given block hash
+    /// * `Err(Error::ParentHashNotFound)` - If the specified block hash doesn't
+    ///   exist in the tree
+    pub fn chain(&self, hash: &BlockHash) -> Result<Vec<BlockHash>, Error> {
+        let mut target = *hash;
+        let mut chain = VecDeque::new();
+
+        // First target block must exist.
+        let node = self.blocks.get(&target).ok_or(Error::ParentHashNotFound)?;
+        chain.push_front(target);
+        target = node.parent;
+
+        // Walk-back the chain until all blocks have been collected.
+        while let Some(node) = self.blocks.get(&target) {
+            chain.push_front(target);
+            target = node.parent;
+        }
+
+        // The first block must be the elder.
+        debug_assert_eq!(chain.get(0).unwrap(), &self.elder());
+
+        Ok(chain.into())
     }
     /// Checks if a block hash is currently tracked in the tree.
     ///
@@ -279,7 +318,7 @@ impl BlockTree {
 
         // Update tips.
         let is_new = self.tips.remove(&parent_hash);
-        debug_assert!(is_new || !is_new); // latter implies existing fork
+        debug_assert!(is_new || !is_new); // latter implies fork-off an older block
 
         let is_new = self.tips.insert(new_hash);
         debug_assert!(is_new);
@@ -447,35 +486,27 @@ impl BlockTree {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
+
     use super::*;
-
-    /// Convenience function, generate random block hash.
-    fn hash() -> BlockHash {
-        use bitcoin::hashes::sha256d::Hash;
-        use rand::Rng;
-
-        let r = rand::rng().random::<[u8; 32]>();
-        let h = Hash::from_bytes_ref(&r);
-        BlockHash::from_raw_hash(*h)
-    }
+    use crate::test_utils::gen_bitcoin_hash;
 
     #[test]
-    fn block_tree() {
+    fn block_tree_finalized_and_orphaned() {
         // Total structure to be processed, in alphabetical order:
         //
         // ─ A ─── B ─┬─ C
         //         │  └─ D ─── E ─── H ─── I
         //         └──── F ─── G
         //
-        let A = hash();
-        let (B, B_PREV) = (hash(), A);
-        let (C, C_PREV) = (hash(), B);
-        let (D, D_PREV) = (hash(), B);
-        let (E, E_PREV) = (hash(), D);
-        let (F, F_PREV) = (hash(), B);
-        let (G, G_PREV) = (hash(), F);
-        let (H, H_PREV) = (hash(), E);
-        let (I, I_PREV) = (hash(), H);
+        let A = gen_bitcoin_hash();
+        let (B, B_PREV) = (gen_bitcoin_hash(), A);
+        let (C, C_PREV) = (gen_bitcoin_hash(), B);
+        let (D, D_PREV) = (gen_bitcoin_hash(), B);
+        let (E, E_PREV) = (gen_bitcoin_hash(), D);
+        let (F, F_PREV) = (gen_bitcoin_hash(), B);
+        let (G, G_PREV) = (gen_bitcoin_hash(), F);
+        let (H, H_PREV) = (gen_bitcoin_hash(), E);
+        let (I, I_PREV) = (gen_bitcoin_hash(), H);
 
         // Initialize A: CONFIRMATION DEPTH of three.
         //
@@ -654,5 +685,111 @@ mod tests {
         assert!(tips.contains(&I));
 
         assert_eq!(tree.blocks().len(), 2);
+    }
+
+    #[test]
+    fn block_tree_chain_retrieval() {
+        // Total structure to be processed, in alphabetical order:
+        //
+        // ─ A ─── B ─┬─ C
+        //            └─ D ─── E ─── F
+        //
+        let A = gen_bitcoin_hash();
+        let (B, B_PREV) = (gen_bitcoin_hash(), A);
+        let (C, C_PREV) = (gen_bitcoin_hash(), B);
+        let (D, D_PREV) = (gen_bitcoin_hash(), B);
+        let (E, E_PREV) = (gen_bitcoin_hash(), D);
+        let (F, F_PREV) = (gen_bitcoin_hash(), E);
+
+        // Initialize A: CONFIRMATION DEPTH of three.
+        //
+        // ─ A (elder/tip)
+        //
+        let conf_depth = 3;
+        let mut tree = BlockTree::new(A, conf_depth).unwrap();
+
+        // Does not exist yet.
+        let chain = tree.chain(&B).unwrap_err();
+        assert_eq!(chain, Error::ParentHashNotFound);
+
+        let chain = tree.chain(&A).unwrap();
+        assert_eq!(chain, vec![A]);
+
+        // Insert B
+        //
+        // ─ A ─────── B (tip)
+        //   (elder)
+        //
+        tree.insert(B, B_PREV).unwrap();
+
+        // Previous block.
+        let chain = tree.chain(&A).unwrap();
+        assert_eq!(chain, vec![A]);
+
+        let chain = tree.chain(&B).unwrap();
+        assert_eq!(chain, vec![A, B]);
+
+        // Insert C
+        //
+        // ─ B ─────── C (tip)
+        //   (elder)
+        //
+        tree.insert(C, C_PREV).unwrap();
+
+        // Already pruned (finalized).
+        let chain = tree.chain(&A).unwrap_err();
+        assert_eq!(chain, Error::ParentHashNotFound);
+
+        let chain = tree.chain(&B).unwrap();
+        assert_eq!(chain, vec![B]);
+
+        let chain = tree.chain(&C).unwrap();
+        assert_eq!(chain, vec![B, C]);
+
+        // Insert D
+        //
+        // ─ B ──────┬─── C (tip)
+        //   (elder) └─── D (tip)
+        //
+        tree.insert(D, D_PREV).unwrap();
+
+        let chain = tree.chain(&C).unwrap();
+        assert_eq!(chain, vec![B, C]);
+
+        let chain = tree.chain(&D).unwrap();
+        assert_eq!(chain, vec![B, D]);
+
+        // Insert E
+        //
+        // ─ B ──────┬─── C (tip)
+        //   (elder) └─── D ─────── E (tip)
+        //
+        tree.insert(E, E_PREV).unwrap();
+
+        let chain = tree.chain(&C).unwrap();
+        assert_eq!(chain, vec![B, C]);
+
+        let chain = tree.chain(&E).unwrap();
+        assert_eq!(chain, vec![B, D, E]);
+
+        // Insert F
+        //
+        // ─ E ─────── F (tip)
+        //   (elder)
+        //
+        tree.insert(F, F_PREV).unwrap();
+
+        // Already pruned (orphaned)
+        let chain = tree.chain(&B).unwrap_err();
+        assert_eq!(chain, Error::ParentHashNotFound);
+
+        let chain = tree.chain(&C).unwrap_err();
+        assert_eq!(chain, Error::ParentHashNotFound);
+
+        let chain = tree.chain(&E).unwrap();
+        assert_eq!(chain, vec![E]);
+
+        let chain = tree.chain(&F).unwrap();
+        assert_eq!(chain, vec![E, F]);
     }
 }
