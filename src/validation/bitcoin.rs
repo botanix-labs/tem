@@ -121,7 +121,7 @@ impl CheckedBitcoinHeader {
     /// - `NBitsDifficultyTooLow` if the header's provided difficulty target is
     ///   too low
     /// - `FailedPowTargetValidation` if the proof-of-work validation fails
-    pub fn new_checked(untrusted: BitcoinHeader) -> Result<Self, Error> {
+    pub fn new(untrusted: BitcoinHeader) -> Result<Self, Error> {
         let nbits = Target::from_compact(untrusted.bits);
         // NOTE: The Bitcoin "difficulty" gets lower as it becomes harder.
         if nbits > *REQUIRED_TARGET {
@@ -191,12 +191,12 @@ impl CheckedBitcoinTransaction {
     /// - `MerkleRootError` if the proof is malformed
     /// - `MerkleRootMismatch` if the proof doesn't produce the expected root
     /// - `TxidNotIncluded` if the transaction isn't included in the proof
-    pub fn new_checked(
+    pub fn new(
         untrusted: Transaction,
-        proof: PartialMerkleTree,
+        proof: &PartialMerkleTree,
         checked: &CheckedBitcoinHeader,
     ) -> Result<Self, Error> {
-        verify_transaction_proof(&untrusted, proof, checked.as_ref().merkle_root.as_ref())?;
+        verify_transaction_proof(&untrusted, &proof, &checked.as_ref().merkle_root)?;
         let trusted = untrusted;
 
         Ok(CheckedBitcoinTransaction {
@@ -238,28 +238,21 @@ impl CheckedBitcoinTransaction {
 /// - `TxidNotIncluded` if the transaction isn't found in the proof matches
 pub fn verify_transaction_proof(
     untrusted: &Transaction,
-    proof: PartialMerkleTree,
-    // TODO: Should this be `TxMerkleNode`?
-    root_hash: &[u8; 32],
+    proof: &PartialMerkleTree,
+    root_hash: &TxMerkleNode,
 ) -> Result<(), Error> {
     let mut matches = vec![];
-    let mut indexes = vec![]; // TODO: Check this?
+    let mut indexes = vec![];
 
     let computed_txid = untrusted.compute_txid();
     let computed_root = proof
         .extract_matches(&mut matches, &mut indexes)
         .map_err(Error::MerkleRootError)?;
 
-    let &hash = bitcoin::hashes::sha256d::Hash::from_bytes_ref(root_hash);
-    let root_hash = TxMerkleNode::from_raw_hash(hash);
-
     // VALIDATE: Compare the computed root hash against the expected root.
-    //
-    // TODO: Look into that theoretical second pre-image attack, and whether it
-    // is a concern.
-    if root_hash != computed_root {
+    if root_hash != &computed_root {
         return Err(Error::MerkleRootMismatch {
-            expected: root_hash,
+            expected: *root_hash,
             got: computed_root,
         });
     }
@@ -270,6 +263,10 @@ pub fn verify_transaction_proof(
             txid: computed_txid,
         });
     }
+
+    // We do not need to know the exact position of the transaction in the list,
+    // only that it was included.
+    let _ = indexes;
 
     Ok(())
 }
