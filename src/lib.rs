@@ -90,14 +90,18 @@ pub mod validation;
 // TODO: Hide behind feature/cfg guard?
 pub mod test_utils {
     use crate::{
-        foundation::proof::FoundationStateRoot,
-        validation::pegout::{PegoutData, PegoutId, PegoutWithId},
+        foundation::Sorted,
+        validation::{
+            bitcoin::verify_transaction_proof,
+            pegout::{PegoutData, PegoutId, PegoutWithId},
+        },
     };
     use alloy_primitives::TxHash;
     use bitcoin::{
-        BlockHash, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, WPubkeyHash, Witness,
+        BlockHash, OutPoint, ScriptBuf, Sequence, TxIn, TxMerkleNode, TxOut, Txid, WPubkeyHash,
+        Witness, hashes::Hash, merkle_tree::PartialMerkleTree,
     };
-    use rand::Rng;
+    use rand::{Rng, seq::SliceRandom};
 
     // Re-export
     pub use crate::foundation::proof::test_utils::gen_foundation_state_root;
@@ -121,6 +125,9 @@ pub mod test_utils {
 
             input.push(txin);
         }
+
+        // Sort the inputs according to `Sorted<_>`.
+        let input = Sorted::from(input).to_vec();
 
         let mut output = vec![];
         for pegout in pegouts {
@@ -146,6 +153,63 @@ pub mod test_utils {
         let r = rand::rng().random::<[u8; 32]>();
         let h = Hash::from_bytes_ref(&r);
         BlockHash::from_raw_hash(*h)
+    }
+
+    pub fn gen_bitcoin_header() -> bitcoin::block::Header {
+        let r = rand::rng().random::<[u8; 32]>();
+        let merkle_root = TxMerkleNode::from_byte_array(r);
+
+        bitcoin::block::Header {
+            version: bitcoin::block::Version::TWO,
+            prev_blockhash: gen_bitcoin_hash(),
+            merkle_root,
+            time: 0,
+            // TODO: Rethink this approach.
+            bits: crate::validation::bitcoin::REQUIRED_TARGET.to_compact_lossy(),
+            nonce: 0,
+        }
+    }
+
+    pub fn gen_bitcoin_header_with_proof(
+        tx: &bitcoin::Transaction,
+    ) -> (bitcoin::block::Header, PartialMerkleTree) {
+        let tx_txid = tx.compute_txid();
+        let mut txids = vec![tx_txid];
+
+        // Generate from three up to 10 transactions.
+        for _ in 0..rand::rng().random_range(3..10) {
+            txids.push(gen_bitcoin_txid());
+        }
+
+        // Mixup the txid list
+        txids.shuffle(&mut rand::rng());
+
+        // Compute the merkle root of all transactions.
+        let merkle_root: TxMerkleNode = bitcoin::merkle_tree::calculate_root(txids.iter().cloned())
+            .unwrap()
+            .to_raw_hash()
+            .into();
+
+        // Compute the proof by creating a matches array where only the tx position is true.
+        let matches: Vec<bool> = txids.iter().map(|txid| *txid == tx_txid).collect();
+        let proof = PartialMerkleTree::from_txids(&txids, &matches);
+
+        // Sanity-check
+        #[cfg(debug_assertions)]
+        verify_transaction_proof(&tx, &proof, &merkle_root)
+            .expect("generated invalid merkle proof");
+
+        let header = bitcoin::block::Header {
+            version: bitcoin::block::Version::TWO,
+            prev_blockhash: gen_bitcoin_hash(),
+            merkle_root,
+            time: 0,
+            // TODO: Rethink this approach.
+            bits: crate::validation::bitcoin::REQUIRED_TARGET.to_compact_lossy(),
+            nonce: 0,
+        };
+
+        (header, proof)
     }
 
     pub fn gen_bitcoin_txid() -> Txid {
