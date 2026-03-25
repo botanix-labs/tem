@@ -1,29 +1,36 @@
-_(This document has been revised with Claude.AI)_
+> [!WARNING]
+> **This project has been halted until further notice and is archived. No further development or maintenance is planned at this time.**
 
-# Introduction
+## Introduction
 
-This document describes the core architectural components that Botanix requires to achieve secure, decentralized Bitcoin withdrawals (pegouts). The rationale and technical foundation for this work was established in our [initial Proof-of-concept specification](./docs/initial_spec.md).
+This repository implements the core infrastructure for the final, hardened version of Botanix — bringing fully secure, decentralized Bitcoin withdrawals (pegouts) to production. It is the engineering realization of the [Dynamic Federation whitepaper](./spec/dynafed.pdf), our primary technical specification, together with the earlier [Proof-of-Concept specification](./docs/initial_spec.md) that established the cryptographic foundations.
 
-This project encompasses two interconnected but distinct components: the **Trusted Execution Machine (TEM)** and the **Foundation Layer**.
+The system is built around two interconnected components:
 
-<div align="center">
-<img src="docs/assets/tem_overview.png" alt="Trusted Execution Machine" width="100%">
-</div>
+- **Foundation Layer**: a thin state verification layer that manages validator coordination and pegout lifecycle across the distributed multisig system
+- **Trusted Execution Machine (TEM)**: an isolated, networkless environment that cryptographically validates and authorizes pegout requests
+
+## Building
+
+This repository is primarily intended to be used as a library. Further structural changes to follow.
+
+To generate the documentation for `botanix_tem`:
+
+```
+cargo doc --document-private-items
+```
 
 ## Foundation Layer
 
-The Foundation Layer manages the complex validator coordination logic that underpins Botanix's multisig system and serves as the foundation for the eventual dynamic federation (DynaFed) implementation. It processes input from the Botanix chain through a Non-Deterministic Data (NDD) messaging system and maintains deterministic state management for all validator operations.
+The most important aspect of Botanix is that much of the coordination and validation occurs off-chain in an asynchronous manner. Although users initiate pegouts deterministically through the EVM, the multisig system must handle complex, time-distributed operations: initiating signing rounds, exchanging multiple FROST packages across undefined timelines, and potentially employing batching systems that collect multiple pegouts before constructing PSBT transactions. Furthermore, PSBT transactions may fail or become orphaned on the Bitcoin layer, requiring pending pegouts to be nullified and made spendable again. These moving parts operate on different schedules, and we cannot expect these events to occur simultaneously for all observers. Additionally, validators - who may participate in zero, one, or multiple multisig accounts - cannot reliably track the constantly changing states of all other multisig accounts.
 
-Key responsibilities include:
+The Foundation Layer serves as a thin state verification layer that manages these critical properties without the complexity of tracking states across a constantly evolving landscape of validator set transitions, multisig account changes, rotations, and a dynamic Bitcoin chain where blocks may be orphaned. Following principles similar to the TEM, the Foundation Layer treats all input as potentially malicious, verifies input through cryptographic proofs, and crucially makes all decisions based solely on provided inputs without requiring access to external networks or resources.
 
-- **Validator Set Management**: Handling validator rotations and multisig membership changes
-- **State Commitment Proofs**: Enforcing validator participation through cryptographic commitments
-- **Equivocation Detection**: Providing the infrastructure for detecting and penalizing malicious validator behavior
-- **Deterministic State Transitions**: Ensuring all validators maintain consistent views of system state, which is critical for implementing penalties and equivocation handling
+<div align="center">
+<img src="assets/foundation_overview.png" alt="Foundation Layer Overview" width="100%">
+</div>
 
 The TEM depends on the Foundation Layer for validator state information, while the Foundation Layer operates independently. This unidirectional dependency ensures that the Foundation Layer can function as a standalone validator coordination system while providing the necessary infrastructure for TEM operations.
-
-=> **More indepth writeup on the [Foundation Layer](docs/foundation.md)**
 
 ## Trusted Execution Machine (TEM)
 
@@ -37,21 +44,39 @@ The TEM's primary security benefits include:
 - **Sequential Validation**: The pegout validation process operates deterministically with fewer moving parts, making the system significantly easier to test, audit, and reason about
 - **Cryptographic Verification**: All trust assumptions are eliminated through comprehensive proof verification
 
-=> **More indepth writeup on the [Trusted Execution Machine (TEM)](docs/tem.md)**
+<div align="center">
+<img src="assets/tem_overview.png" alt="TEM Overview" width="100%">
+</div>
 
-# Building
+### Offline Validation
 
-This repository is primarily intended to be used as a library. Further structural changes - including a TEM binary - to follow.
+The validation module serves as the security core for the TEM, implementing a comprehensive trust-but-verify model where all external data must be cryptographically validated before use. This approach is essential for TEE deployment where the system operates without network access or persistent storage capabilities.
 
-To generate the documentation for `botanix_tem`:
+The validation module implements a hierarchical "Checked Types" pattern where validated data is wrapped in types that guarantee successful validation:
 
-```
-cargo doc --document-private-items
-```
+- `CheckedBitcoinHeader`: Bitcoin header with validated proof-of-work
+- `CheckedTendermintHeader`: Tendermint header with validated BFT consensus
+- `CheckedBotanixHeader`: Botanix header validated against Tendermint commitment
+- `CheckedPegoutWithId`: Pegout with complete multi-layer proof verification
+
+These types prevent direct access to unvalidated data and ensure that only cryptographically verified information is used in downstream processing.
+
+<div align="center">
+<img src="assets/validation_overview.png" alt="TEM Validation Overview" width="70%">
+</div>
+
+The validation system operates under several core principles that ensure security and reliability:
+
+* **Cryptographic Verification**: All trust is based on cryptographic proofs rather than external sources or assumptions
+* **Multi-Chain Consistency**: Data consistency is enforced across heterogeneous blockchain systems using their respective proof mechanisms
+* **Stateless Operation**: Validation occurs without persistent state, reconstructing all necessary context from provided proofs
+* **Deterministic Results**: Identical inputs always produce identical validation outcomes, essential for distributed TEE consensus
+
+The validation module consists of four specialized components, each handling validation for different blockchain systems and operations:
 
 # Roadmap
 
-Temporary roadmap while this repository remains primarily work-in-progress. This section will be removed later on.
+_Temporary roadmap while this repository remains primarily work-in-progress. This section will be removed later on._
 
 ## Foundation Module (`src/foundation/`)
 
