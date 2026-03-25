@@ -4,7 +4,7 @@
 //! trie-based storage.
 //!
 //! <img src="data:image/png;base64,
-#![doc = include_str!("../../../docs/assets/foundation_module_system.base64")]
+#![doc = include_str!("../../../assets/foundation_module_system.base64")]
 //! " alt="Validation Workflow Diagram" style="max-width: 100%; width: 1000px; height: auto; display: block; margin: 0 auto;">
 use memory_db::{HashKey, MemoryDB};
 use sha2::{Digest, Sha256};
