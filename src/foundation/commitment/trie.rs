@@ -19,6 +19,7 @@
 //! vectors in state management systems, including double-spending prevention
 //! and unauthorized state modifications.
 use super::{AliasFatDBMut, CommitSchema};
+use serde::{Deserialize, Serialize};
 use trie_db::TrieMut;
 
 /// Trie operation errors.
@@ -100,7 +101,7 @@ pub trait EntryT {
 }
 
 /// 32-byte cryptographic commitment to a trie entry key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageKey([u8; 32]);
 
 impl AsRef<[u8]> for StorageKey {
@@ -116,7 +117,7 @@ impl From<[u8; 32]> for StorageKey {
 }
 
 /// 32-byte cryptographic commitment to a trie entry value.  
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageValue([u8; 32]);
 
 impl AsRef<[u8]> for StorageValue {
@@ -132,7 +133,7 @@ impl From<[u8; 32]> for StorageValue {
 }
 
 /// A 32-byte cryptographic commitment to a trie state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitmentStateRoot([u8; 32]);
 
 impl AsRef<[u8; 32]> for CommitmentStateRoot {
