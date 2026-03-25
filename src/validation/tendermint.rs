@@ -184,7 +184,7 @@ impl CheckedTendermintChain {
     ///   validator set
     /// - `InvalidCommitStructure` or `InvalidValidatorSignatures` for signature
     ///   validation failures
-    pub fn new_checked_via_genesis(
+    pub fn new_via_genesis(
         untrusted: SignedHeader,
         validators: Vec<Validator>,
     ) -> Result<Self, Error> {
@@ -237,7 +237,7 @@ impl CheckedTendermintChain {
     /// # Returns
     ///
     /// A new `CheckedTendermintChain` or an error if validation fails.
-    pub fn new_checked_via_bitcoin(
+    pub fn new_via_bitcoin(
         untrusted: SignedHeader,
         checked: &CheckedBitcoinHeader,
     ) -> Result<Self, ()> {
@@ -411,8 +411,7 @@ mod tests {
         let signed_header_invalid = cbft_signed_header_from_json(signed_header_invalid).unwrap();
 
         let mut chain =
-            CheckedTendermintChain::new_checked_via_genesis(signed_header_parent, validators)
-                .unwrap();
+            CheckedTendermintChain::new_via_genesis(signed_header_parent, validators).unwrap();
 
         let err = chain
             .append_untrusted(signed_header_invalid, None)
