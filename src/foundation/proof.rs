@@ -28,20 +28,21 @@ use crate::{
     validation::pegout::PegoutId,
 };
 use bitcoin::{BlockHash, Txid};
+use serde::{Deserialize, Serialize};
 
 /// A 32-byte cryptographic commitment to the complete Foundation Layer state.
 ///
 /// This root hash is computed over four components: context metadata,
 /// commitment trie root, Bitcoin headers, and auxiliary events. All validators
 /// must compute identical roots for consensus validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoundationStateRoot([u8; 32]);
 
 /// Context and metadata for Foundation Layer state format.
 ///
 /// **Important**: This structure is primarily reserved for future extensions
 /// and will likely be expanded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     pub height: u64,
 }
@@ -55,7 +56,7 @@ pub struct Context {
 /// as efficient lookup mechanisms, enabling syncing nodes to reconstruct
 /// commitment verification state without running the full commitment validation
 /// process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoundationStateProof {
     /// Context for this state format.
     pub context: Context,
@@ -109,7 +110,7 @@ impl FoundationStateProof {
 }
 
 /// Per-block auxiliary events providing efficient lookups, useful for indexing.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AuxEvent {
     /// A new pegout has been initiated and is available for spending.
     ///
@@ -177,7 +178,7 @@ impl ToCommit for AuxEvent {
                 txid,
                 pegouts,
             } => {
-                h.append_message(b"aux_event:register_bitcoin_tx", b"");
+                h.append_message(b"aux_event:insert_bitcoin_tx", b"");
                 block_hash.append_to_commit(h);
                 txid.append_to_commit(h);
                 pegouts.append_to_commit(h);
